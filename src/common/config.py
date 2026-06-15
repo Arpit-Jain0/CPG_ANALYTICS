@@ -62,6 +62,11 @@ class Settings(BaseSettings):
         default="data/output/archive", alias="DATA_OUTPUT_ARCHIVE"
     )
 
+    # ── Ingestion config ──────────────────────────────────────────────────────
+    ingestion_config: str = Field(
+        default="config/ingestion.yaml", alias="INGESTION_CONFIG"
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

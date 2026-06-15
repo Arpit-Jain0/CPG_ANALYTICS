@@ -1,0 +1,144 @@
+# =============================================================================
+# CPG Analytics — Ingestion Pipeline Configuration
+# =============================================================================
+#
+# This file drives the ingestion pipeline end-to-end.  Edit it to:
+#   • add / remove source files and sheets without touching Python code
+#   • toggle individual files or sheets on/off with `enabled: false`
+#   • change the load type (source_dir, glob_pattern, late-arriving behaviour)
+#   • swap out which DB loader function handles a given sheet
+#
+# Path to this file is controlled by the INGESTION_CONFIG env var
+# (default: config/ingestion.yaml, resolved relative to --root).
+#
+# ORDERING RULE — historical.files must appear in this order:
+#   1. Dimension tables   (referenced by later FK checks)
+#   2. Secondary feeds    (promo, marketing, competitor)
+#   3. Sales transactions (FK depends on dims already committed)
+# =============================================================================
+
+# ── Pipeline-wide defaults ────────────────────────────────────────────────────
+defaults:
+  archive_after_load: true       # move source file to data/output/archive/ after load
+  export_processed: true         # write clean rows to data/output/processed/
+  export_quality_report: true    # write DQ entries to data/output/quality_reports/
+  chunk_size: 500                # rows per executemany call (tune for memory / speed)
+  header_scan_rows: 15           # max rows scanned for auto header-row detection
+
+
+# =============================================================================
+# HISTORICAL — bulk one-time load from data/input/historical/
+# =============================================================================
+historical:
+  source_dir: data/input/historical
+
+  files:
+
+    # ── Step 1: Reference dimensions ─────────────────────────────────────────
+    #   All four dimension sheets are loaded in a single DB transaction so the
+    #   FK graph is consistent before any fact rows are inserted.
+    - name: historical_data.xlsx
+      description: "Master reference workbook — all dimension tables"
+      enabled: true
+      archive_after_load: true
+      sheets:
+        - name: dim_region
+          role: dimension
+          loader: dim_region
+          enabled: true
+
+        - name: dim_store
+          role: dimension
+          loader: dim_store
+          enabled: true
+
+        - name: dim_product
+          role: dimension
+          loader: dim_product_seed   # SCD-2 initial seed; skips existing current rows
+          enabled: true
+
+        - name: seasonal_calendar
+          role: dimension
+          loader: seasonal_calendar
+          enabled: true
+
+    # ── Step 2: Secondary / reference feeds ──────────────────────────────────
+    - name: promo_windows.xlsx
+      description: "Promotional windows calendar"
+      enabled: true
+      archive_after_load: true
+      sheets:
+        - name: PromoWindows
+          role: secondary
+          loader: promo_windows
+          enabled: true
+
+    - name: marketing_campaigns.xlsx
+      description: "Marketing campaign metadata"
+      enabled: true
+      archive_after_load: true
+      sheets:
+        - name: Campaigns
+          role: secondary
+          loader: marketing_campaigns
+          enabled: true
+
+    - name: competitor_prices.xlsx
+      description: "Weekly competitor price observations"
+      enabled: true
+      archive_after_load: true
+      sheets:
+        - name: CompetitorPrices
+          role: secondary
+          loader: competitor_prices
+          enabled: true
+
+    # ── Step 3: Historical sales transactions ────────────────────────────────
+    #   late_arriving_detection is false here — it only makes sense for
+    #   incremental batches (historical data has no "reference max timestamp").
+    - name: pos_sales_history.xlsx
+      description: "POS channel historical sales (Schema A — transaction_id / ts / qty / amount)"
+      enabled: true
+      archive_after_load: true
+      export_processed: true
+      export_quality_report: true
+      late_arriving_detection: false
+      sheets:
+        - name: Sales
+          role: sales
+          source_system: POS   # explicit; overrides auto-detection
+          enabled: true
+
+    - name: online_sales_history.xlsx
+      description: "Online channel history (Schema B — no amount column; revenue derived)"
+      enabled: true
+      archive_after_load: true
+      export_processed: true
+      export_quality_report: true
+      late_arriving_detection: false
+      sheets:
+        - name: Orders
+          role: sales
+          source_system: ONLINE
+          enabled: true
+
+
+# =============================================================================
+# INCREMENTAL — batch files dropped into data/input/incremental/
+# =============================================================================
+#
+# Files are discovered via glob_pattern and processed oldest-first (by name).
+# Each file may contain multiple sheets; roles are detected automatically:
+#   • sheet name in scd2_sheet_names → SCD-2 product-attribute update
+#   • anything else                  → sales (source system auto-detected)
+incremental:
+  source_dir: data/input/incremental
+  glob_pattern: "*.xlsx"
+  late_arriving_detection: true   # rows with ts < current max_ts flagged as late
+  archive_after_load: true
+  export_processed: true
+  export_quality_report: true
+
+  # Sheet names that carry SCD-2 product attribute changes (case-insensitive match)
+  scd2_sheet_names:
+    - product_updates

@@ -38,6 +38,7 @@ from src.common.config import get_settings
 from src.common.db import get_session
 from src.common.excel_io import read_workbook
 from src.dq.validators import DQEntry, validate_canonical_row
+from src.ingestion.ingestion_config import IngestionConfig, load_ingestion_config
 from src.ingestion.mappings import CANONICAL_SALES_COLS, apply_mapping, detect_source_system
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -583,125 +584,171 @@ def _archive(src: Path, archive_dir: Path) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# HISTORICAL BULK LOAD
+# LOADER REGISTRY  (maps ingestion_config.yaml loader names → functions)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def load_historical(root: Path) -> None:
-    cfg        = get_settings()
-    hist_dir   = root / cfg.data_input_historical
-    arch_dir   = root / cfg.data_output_archive
-    proc_dir   = root / cfg.data_output_processed
-    qr_dir     = root / cfg.data_output_quality_reports
+_LOADER_REGISTRY: dict[str, Any] = {
+    "dim_region":       _load_dim_region,
+    "dim_store":        _load_dim_store,
+    "dim_product_seed": _init_dim_product,
+    "seasonal_calendar": _load_seasonal_calendar,
+    "promo_windows":    _load_promo_windows,
+    "marketing_campaigns": _load_campaigns,
+    "competitor_prices": _load_competitor_prices,
+}
+
+
+def _resolve_ingestion_config(root: Path, config_path: str | None = None) -> IngestionConfig:
+    """Load ingestion config from an explicit path, or from the Settings default."""
+    path = Path(config_path) if config_path else root / get_settings().ingestion_config
+    return load_ingestion_config(path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HISTORICAL BULK LOAD  (config-driven)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def load_historical(root: Path, ingestion_cfg: IngestionConfig | None = None) -> None:
+    """
+    Bulk-load all historical files declared in ingestion_config.yaml.
+
+    Files are processed in the order they appear in the YAML, so place dimension
+    files before sales files to satisfy FK constraints.
+    """
+    cfg = get_settings()
+    if ingestion_cfg is None:
+        ingestion_cfg = _resolve_ingestion_config(root)
+
+    hist_dir = root / ingestion_cfg.historical.source_dir
+    arch_dir = root / cfg.data_output_archive
+    proc_dir = root / cfg.data_output_processed
+    qr_dir   = root / cfg.data_output_quality_reports
     for d in (arch_dir, proc_dir, qr_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    # ── 1. Load dimension tables ────────────────────────────────────────────
-    ref_path = hist_dir / "historical_data.xlsx"
-    if not ref_path.exists():
-        raise FileNotFoundError(f"Reference workbook not found: {ref_path}")
+    defaults = ingestion_cfg.defaults
 
-    logger.info("Loading reference dimensions from {}", ref_path.name)
-    ref_sheets = read_workbook(ref_path)
+    for file_cfg in ingestion_cfg.historical.files:
+        if not file_cfg.enabled:
+            logger.info("Skipping disabled file: {}", file_cfg.name)
+            continue
 
-    with get_session() as session:
-        batch_id = _open_batch(session, "HISTORICAL", ref_path.name, "REFERENCE")
-        n_reg  = _load_dim_region(session, ref_sheets["dim_region"])
-        n_sto  = _load_dim_store(session, ref_sheets["dim_store"])
-        n_cal  = _load_seasonal_calendar(session, ref_sheets["seasonal_calendar"])
-        n_prod = _init_dim_product(session, ref_sheets["dim_product"])
-        _close_batch(session, batch_id, {
-            "rows_in": n_reg + n_sto + n_cal + n_prod,
-            "inserted": n_reg + n_sto + n_cal + n_prod,
-            "deduped": 0, "rejected": 0, "repaired": 0,
-            "flagged": 0, "late_arriving": 0,
-        })
-        logger.info(
-            "Dims loaded — regions:{} stores:{} calendar:{} products:{}",
-            n_reg, n_sto, n_cal, n_prod,
-        )
-
-    # ── 2. Secondary feeds ──────────────────────────────────────────────────
-    _feed_map = {
-        "promo_windows.xlsx":       ("PromoWindows", _load_promo_windows),
-        "marketing_campaigns.xlsx": ("Campaigns",    _load_campaigns),
-        "competitor_prices.xlsx":   ("CompetitorPrices", _load_competitor_prices),
-    }
-    for fname, (sheet_hint, loader_fn) in _feed_map.items():
-        fpath = hist_dir / fname
+        fpath = hist_dir / file_cfg.name
         if not fpath.exists():
-            logger.warning("Secondary feed not found: {} — skipping", fname)
-            continue
-        sheets = read_workbook(fpath)
-        df     = next(iter(sheets.values()))   # single-sheet files
-        with get_session() as session:
-            batch_id = _open_batch(session, "HISTORICAL", fname, fname.split("_")[0].upper())
-            n = loader_fn(session, df)
-            _close_batch(session, batch_id, {
-                "rows_in": n, "inserted": n, "deduped": 0, "rejected": 0,
-                "repaired": 0, "flagged": 0, "late_arriving": 0,
-            })
-            logger.info("Loaded {} rows from {}", n, fname)
-
-    # ── 3. Historical sales transactions ────────────────────────────────────
-    sales_files = [
-        (hist_dir / "pos_sales_history.xlsx",    "Sales",  "POS"),
-        (hist_dir / "online_sales_history.xlsx", "Orders", "ONLINE"),
-    ]
-
-    for fpath, sheet_name, source_system in sales_files:
-        if not fpath.exists():
-            logger.warning("Sales file not found: {} — skipping", fpath.name)
+            logger.warning("Historical file not found: {} — skipping", file_cfg.name)
             continue
 
-        logger.info("Processing {} ({})", fpath.name, source_system)
-        sheets = read_workbook(fpath, target_sheets=[sheet_name])
-        df_raw = sheets.get(sheet_name)
-        if df_raw is None or df_raw.empty:
-            logger.warning("Sheet '{}' empty in {} — skipping", sheet_name, fpath.name)
+        enabled_sheets = [s for s in file_cfg.sheets if s.enabled]
+        if not enabled_sheets:
+            logger.debug("No enabled sheets in {} — skipping file", file_cfg.name)
             continue
 
-        df_mapped = apply_mapping(df_raw, source_system, fpath)
+        dim_sec_sheets = [s for s in enabled_sheets if s.role in ("dimension", "secondary")]
+        sales_sheets   = [s for s in enabled_sheets if s.role == "sales"]
 
-        with get_session() as session:
-            v_stores = _valid_stores(session)
-            v_skus   = _valid_skus(session)
-            # Late-arriving detection is only meaningful for incremental loads;
-            # passing None disables it for the historical bulk load.
-            batch_id = _open_batch(session, "HISTORICAL", fpath.name, source_system)
+        sheets_data = read_workbook(fpath, target_sheets=[s.name for s in enabled_sheets])
 
-            (rows_in, inserted, deduped, rejected,
-             repaired, late_arr, new_rows, dq_entries) = _process_sales_df(
-                session, df_mapped, source_system, fpath.name,
-                batch_id, "HISTORICAL", max_ts=None, v_stores=v_stores, v_skus=v_skus,
+        # ── Dimension / secondary sheets → single committed session ──────────
+        # All sheets from one workbook share a transaction so FKs are consistent
+        # before any fact rows in a later file attempt inserts.
+        if dim_sec_sheets:
+            has_dims = any(s.role == "dimension" for s in dim_sec_sheets)
+            src_label = "REFERENCE" if has_dims else (dim_sec_sheets[0].loader or "SECONDARY").upper()
+            logger.info("Loading {}: {} dim/secondary sheet(s)", file_cfg.name, len(dim_sec_sheets))
+
+            with get_session() as session:
+                batch_id   = _open_batch(session, "HISTORICAL", file_cfg.name, src_label)
+                total_rows = total_ins = 0
+
+                for sheet_cfg in dim_sec_sheets:
+                    df = sheets_data.get(sheet_cfg.name)
+                    if df is None or df.empty:
+                        logger.warning("  Sheet '{}' empty — skipping", sheet_cfg.name)
+                        continue
+                    if not sheet_cfg.loader:
+                        logger.error(
+                            "  Sheet '{}' has role='{}' but no loader configured — skipping",
+                            sheet_cfg.name, sheet_cfg.role,
+                        )
+                        continue
+                    loader_fn = _LOADER_REGISTRY.get(sheet_cfg.loader)
+                    if loader_fn is None:
+                        logger.error(
+                            "  Unknown loader '{}' for sheet '{}' — skipping",
+                            sheet_cfg.loader, sheet_cfg.name,
+                        )
+                        continue
+
+                    n = loader_fn(session, df)
+                    total_rows += n
+                    total_ins  += n
+                    logger.info("  {} → loader='{}': {} rows", sheet_cfg.name, sheet_cfg.loader, n)
+
+                _close_batch(session, batch_id, {
+                    "rows_in": total_rows, "inserted": total_ins,
+                    "deduped": 0, "rejected": 0, "repaired": 0,
+                    "flagged": 0, "late_arriving": 0,
+                })
+
+        # ── Sales sheets → one session per sheet ─────────────────────────────
+        for sheet_cfg in sales_sheets:
+            df_raw = sheets_data.get(sheet_cfg.name)
+            if df_raw is None or df_raw.empty:
+                logger.warning(
+                    "Sheet '{}' in {} empty — skipping", sheet_cfg.name, file_cfg.name
+                )
+                continue
+
+            src_sys = sheet_cfg.source_system
+            if src_sys == "auto":
+                src_sys = detect_source_system(fpath, sheet_cfg.name, df_raw)
+
+            df_mapped   = apply_mapping(df_raw, src_sys, fpath)
+            # Late-arriving detection is meaningless for historical bulk loads;
+            # the YAML default is false and the fallback here enforces that.
+            late_detect = file_cfg.resolve_late_arriving(fallback=False)
+
+            with get_session() as session:
+                v_stores = _valid_stores(session)
+                v_skus   = _valid_skus(session)
+                max_ts   = _max_transaction_ts(session) if late_detect else None
+                batch_id = _open_batch(session, "HISTORICAL", fpath.name, src_sys)
+
+                (rows_in, inserted, deduped, rejected,
+                 repaired, late_arr, new_rows, dq_entries) = _process_sales_df(
+                    session, df_mapped, src_sys, fpath.name,
+                    batch_id, "HISTORICAL", max_ts, v_stores, v_skus,
+                )
+
+                _insert_dq_logs(session, dq_entries)
+                _close_batch(session, batch_id, {
+                    "rows_in": rows_in, "inserted": inserted, "deduped": deduped,
+                    "rejected": rejected, "repaired": repaired,
+                    "flagged": sum(
+                        1 for e in dq_entries
+                        if e.action_taken == "FLAGGED"
+                        and e.record_identifier not in {
+                            ex.record_identifier for ex in dq_entries
+                            if ex.action_taken == "REJECTED"
+                        }
+                    ),
+                    "late_arriving": late_arr,
+                })
+
+            stem = fpath.stem
+            if file_cfg.resolve_export_processed(defaults):
+                _export_processed(new_rows, proc_dir / f"{stem}_batch{batch_id}.xlsx")
+            if file_cfg.resolve_export_quality_report(defaults):
+                _export_quality_report(dq_entries, qr_dir / f"{stem}_batch{batch_id}_quality.xlsx")
+
+            logger.info(
+                "{}/{}: rows_in={} inserted={} deduped={} rejected={} repaired={} late={}",
+                file_cfg.name, sheet_cfg.name, rows_in, inserted, deduped,
+                rejected, repaired, late_arr,
             )
 
-            _insert_dq_logs(session, dq_entries)
-            _close_batch(session, batch_id, {
-                "rows_in": rows_in, "inserted": inserted, "deduped": deduped,
-                "rejected": rejected, "repaired": repaired,
-                "flagged": sum(
-                    1 for e in dq_entries
-                    if e.action_taken == "FLAGGED"
-                    and e.record_identifier not in {
-                        ex.record_identifier for ex in dq_entries
-                        if ex.action_taken == "REJECTED"
-                    }
-                ),
-                "late_arriving": late_arr,
-            })
-
-        stem = fpath.stem
-        _export_processed(new_rows, proc_dir / f"{stem}_batch{batch_id}.xlsx")
-        _export_quality_report(dq_entries, qr_dir / f"{stem}_batch{batch_id}_quality.xlsx")
-
-        logger.info(
-            "{}: rows_in={} inserted={} deduped={} rejected={} repaired={} late={}",
-            fpath.name, rows_in, inserted, deduped, rejected, repaired, late_arr,
-        )
-
-    # ── Archive all historical input files ──────────────────────────────────
-    for f in hist_dir.glob("*.xlsx"):
-        _archive(f, arch_dir)
+        if file_cfg.resolve_archive(defaults):
+            _archive(fpath, arch_dir)
 
     logger.info("Historical load complete.")
 
@@ -710,39 +757,47 @@ def load_historical(root: Path) -> None:
 # INCREMENTAL BATCH PROCESSOR
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def process_incremental(root: Path) -> None:
-    cfg      = get_settings()
-    incr_dir = root / cfg.data_input_incremental
+def process_incremental(root: Path, ingestion_cfg: IngestionConfig | None = None) -> None:
+    """
+    Process all batch files in the incremental input directory, oldest-first.
+
+    Behaviour (source directory, glob pattern, late-arriving detection, SCD-2
+    sheet names) is driven by config/ingestion.yaml.
+    """
+    cfg = get_settings()
+    if ingestion_cfg is None:
+        ingestion_cfg = _resolve_ingestion_config(root)
+
+    incr_cfg = ingestion_cfg.incremental
+    incr_dir = root / incr_cfg.source_dir
     arch_dir = root / cfg.data_output_archive
     proc_dir = root / cfg.data_output_processed
     qr_dir   = root / cfg.data_output_quality_reports
     for d in (arch_dir, proc_dir, qr_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    batch_files = sorted(incr_dir.glob("*.xlsx"))
+    batch_files = sorted(incr_dir.glob(incr_cfg.glob_pattern))
     if not batch_files:
-        logger.info("No incremental files found in {}", incr_dir)
+        logger.info("No incremental files found in {} (glob='{}')", incr_dir, incr_cfg.glob_pattern)
         return
 
     for fpath in batch_files:
         logger.info("── Incremental batch: {}", fpath.name)
-        sheets = read_workbook(fpath)     # all non-ghost sheets
+        sheets = read_workbook(fpath)
 
         if not sheets:
             logger.warning("No readable sheets in {} — skipping", fpath.name)
             continue
 
-        # Determine which sheets are sales vs product_updates
         sales_df:   pd.DataFrame | None = None
         source_sys: str = "UNKNOWN"
         scd2_df:    pd.DataFrame | None = None
 
         for sname, df in sheets.items():
-            if sname.lower() == "product_updates":
+            if incr_cfg.is_scd2_sheet(sname):
                 scd2_df = df
-                logger.info("Found product_updates sheet ({} rows)", len(df))
+                logger.info("Found SCD-2 sheet '{}' ({} rows)", sname, len(df))
             else:
-                # Treat as a sales sheet — detect source system
                 try:
                     ss = detect_source_system(fpath, sname, df)
                     sales_df   = apply_mapping(df, ss, fpath)
@@ -761,19 +816,18 @@ def process_incremental(root: Path) -> None:
         with get_session() as session:
             v_stores = _valid_stores(session)
             v_skus   = _valid_skus(session)
-            max_ts   = _max_transaction_ts(session)
+            # max_ts=None disables late-arriving detection when toggled off in config
+            max_ts = _max_transaction_ts(session) if incr_cfg.late_arriving_detection else None
 
             batch_id = _open_batch(session, "INCREMENTAL", fpath.name, source_sys)
 
-            # ── SCD-2 updates (process before sales so new SKU attrs are live)
+            # SCD-2 updates processed before sales so new SKU attrs are visible
             scd2_count = 0
             if scd2_df is not None:
                 scd2_count = _process_scd2_updates(session, scd2_df)
                 if scd2_count:
-                    # Refresh valid SKUs after SCD-2 (new rows may have new keys)
                     v_skus = _valid_skus(session)
 
-            # ── Sales rows ─────────────────────────────────────────────────
             rows_in = inserted = deduped = rejected = repaired = late_arr = 0
             if sales_df is not None and not sales_df.empty:
                 (rows_in, inserted, deduped, rejected,
@@ -783,12 +837,7 @@ def process_incremental(root: Path) -> None:
                 )
                 all_dq.extend(dq_entries)
                 all_new.extend(new_rows)
-
-                flagged = sum(
-                    1 for e in dq_entries
-                    if e.action_taken == "FLAGGED"
-                )
-
+                flagged = sum(1 for e in dq_entries if e.action_taken == "FLAGGED")
                 _insert_dq_logs(session, dq_entries)
             else:
                 flagged = 0
@@ -801,8 +850,10 @@ def process_incremental(root: Path) -> None:
 
         stem = fpath.stem
         if batch_id is not None:
-            _export_processed(all_new, proc_dir / f"{stem}_batch{batch_id}.xlsx")
-            _export_quality_report(all_dq, qr_dir / f"{stem}_batch{batch_id}_quality.xlsx")
+            if incr_cfg.export_processed:
+                _export_processed(all_new, proc_dir / f"{stem}_batch{batch_id}.xlsx")
+            if incr_cfg.export_quality_report:
+                _export_quality_report(all_dq, qr_dir / f"{stem}_batch{batch_id}_quality.xlsx")
 
         logger.info(
             "{}: rows_in={} inserted={} deduped={} rejected={} "
@@ -811,7 +862,8 @@ def process_incremental(root: Path) -> None:
             rejected, repaired, late_arr, scd2_count if scd2_df is not None else 0,
         )
 
-        _archive(fpath, arch_dir)
+        if incr_cfg.archive_after_load:
+            _archive(fpath, arch_dir)
 
     logger.info("Incremental processing complete ({} files).", len(batch_files))
 
@@ -837,6 +889,13 @@ def _cli() -> None:
         default=".",
         help="Repo root directory (default: current working directory)",
     )
+    parser.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="Path to ingestion config YAML (default: <root>/config/ingestion.yaml "
+             "or INGESTION_CONFIG env var)",
+    )
     args = parser.parse_args()
     root = Path(args.root).resolve()
 
@@ -844,10 +903,15 @@ def _cli() -> None:
     logger.add(sys.stderr, level=get_settings().log_level, colorize=True,
                format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}")
 
+    ingestion_cfg = _resolve_ingestion_config(root, args.config)
+    logger.info("Ingestion config loaded ({} historical files, glob='{}')",
+                len(ingestion_cfg.historical.files),
+                ingestion_cfg.incremental.glob_pattern)
+
     if args.mode == "historical":
-        load_historical(root)
+        load_historical(root, ingestion_cfg)
     else:
-        process_incremental(root)
+        process_incremental(root, ingestion_cfg)
 
 
 if __name__ == "__main__":
