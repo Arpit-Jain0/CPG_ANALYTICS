@@ -1,0 +1,219 @@
+{
+  "_doc": "CPG Analytics ingestion config. Add/remove files and sheets here — no Python changes needed.",
+
+  "settings": {
+    "header_scan_rows": 15,
+    "null_values": ["", "NA", "N/A", "NULL", "None", "nan", "NaN", "na", "n/a", "#N/A"],
+    "date_formats": [
+      "%Y-%m-%d %H:%M:%S",
+      "%Y-%m-%dT%H:%M:%S",
+      "%Y-%m-%d %H:%M",
+      "%m/%d/%Y %H:%M:%S",
+      "%m/%d/%Y",
+      "%Y-%m-%d",
+      "%d-%b-%Y %H:%M:%S",
+      "%d-%b-%Y"
+    ],
+    "downstream_dir": "data/output/downstream"
+  },
+
+  "file_groups": [
+
+    {
+      "name": "reference_dimensions",
+      "description": "Master dimension tables — all four in one multi-sheet workbook",
+      "dir": "data/input/historical",
+      "file_pattern": "historical_data.xlsx",
+      "enabled": true,
+      "sheets": [
+        {
+          "sheet": "dim_region",
+          "target_csv": "dim_region.csv",
+          "write_mode": "overwrite",
+          "enabled": true
+        },
+        {
+          "sheet": "dim_store",
+          "target_csv": "dim_store.csv",
+          "write_mode": "overwrite",
+          "enabled": true
+        },
+        {
+          "sheet": "dim_product",
+          "target_csv": "dim_product.csv",
+          "write_mode": "overwrite",
+          "enabled": true
+        },
+        {
+          "sheet": "seasonal_calendar",
+          "target_csv": "seasonal_calendar.csv",
+          "write_mode": "overwrite",
+          "enabled": true
+        }
+      ]
+    },
+
+    {
+      "name": "promo_windows",
+      "description": "Promotional calendar",
+      "dir": "data/input/historical",
+      "file_pattern": "promo_windows.xlsx",
+      "enabled": true,
+      "sheets": [
+        {
+          "sheet": "*",
+          "target_csv": "promo_windows.csv",
+          "write_mode": "overwrite",
+          "enabled": true
+        }
+      ]
+    },
+
+    {
+      "name": "marketing_campaigns",
+      "description": "Marketing campaign metadata",
+      "dir": "data/input/historical",
+      "file_pattern": "marketing_campaigns.xlsx",
+      "enabled": true,
+      "sheets": [
+        {
+          "sheet": "*",
+          "target_csv": "marketing_campaigns.csv",
+          "write_mode": "overwrite",
+          "enabled": true
+        }
+      ]
+    },
+
+    {
+      "name": "competitor_prices",
+      "description": "Weekly competitor price observations",
+      "dir": "data/input/historical",
+      "file_pattern": "competitor_prices.xlsx",
+      "enabled": true,
+      "sheets": [
+        {
+          "sheet": "*",
+          "target_csv": "competitor_prices.csv",
+          "write_mode": "overwrite",
+          "enabled": true
+        }
+      ]
+    },
+
+    {
+      "name": "pos_history",
+      "description": "POS historical sales (Schema A: transaction_id / ts / qty / amount)",
+      "dir": "data/input/historical",
+      "file_pattern": "*pos*.xlsx",
+      "enabled": true,
+      "sheets": [
+        {
+          "sheet": "*",
+          "target_csv": "sales_transactions.csv",
+          "write_mode": "overwrite",
+          "enabled": true,
+          "column_map": {
+            "transaction_id": "transaction_id",
+            "ts":             "transaction_ts",
+            "store_id":       "store_id",
+            "sku":            "sku",
+            "qty":            "quantity",
+            "unit_price":     "unit_price",
+            "amount":         "revenue",
+            "currency":       "currency"
+          },
+          "add_columns": {
+            "source_system": "POS",
+            "source_file":   null
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "online_history",
+      "description": "Online historical sales (Schema B: no amount — revenue absent at source)",
+      "dir": "data/input/historical",
+      "file_pattern": "*online*.xlsx",
+      "enabled": true,
+      "sheets": [
+        {
+          "sheet": "*",
+          "target_csv": "sales_transactions.csv",
+          "write_mode": "append",
+          "enabled": true,
+          "column_map": {
+            "order_id":       "transaction_id",
+            "order_datetime": "transaction_ts",
+            "location_id":    "store_id",
+            "product_sku":    "sku",
+            "units":          "quantity",
+            "price_per_unit": "unit_price",
+            "currency":       "currency"
+          },
+          "add_columns": {
+            "source_system": "ONLINE",
+            "source_file":   null
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "incremental_batches",
+      "description": "Any .xlsx batch dropped into the incremental dir — mixed channel content per file",
+      "dir": "data/input/incremental",
+      "file_pattern": "*.xlsx",
+      "enabled": true,
+      "sheets": [
+        {
+          "sheet": "Sales",
+          "target_csv": "sales_transactions.csv",
+          "write_mode": "append",
+          "enabled": true,
+          "column_map": {
+            "transaction_id": "transaction_id",
+            "ts":             "transaction_ts",
+            "store_id":       "store_id",
+            "sku":            "sku",
+            "qty":            "quantity",
+            "unit_price":     "unit_price",
+            "amount":         "revenue",
+            "currency":       "currency"
+          },
+          "add_columns": {
+            "source_system": "POS",
+            "source_file":   null
+          }
+        },
+        {
+          "sheet": "Orders",
+          "target_csv": "sales_transactions.csv",
+          "write_mode": "append",
+          "enabled": true,
+          "column_map": {
+            "order_id":       "transaction_id",
+            "order_datetime": "transaction_ts",
+            "location_id":    "store_id",
+            "product_sku":    "sku",
+            "units":          "quantity",
+            "price_per_unit": "unit_price",
+            "currency":       "currency"
+          },
+          "add_columns": {
+            "source_system": "ONLINE",
+            "source_file":   null
+          }
+        },
+        {
+          "sheet": "product_updates",
+          "target_csv": "product_updates.csv",
+          "write_mode": "append",
+          "enabled": true
+        }
+      ]
+    }
+
+  ]
+}

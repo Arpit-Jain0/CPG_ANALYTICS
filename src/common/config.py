@@ -64,7 +64,7 @@ class Settings(BaseSettings):
 
     # ── Ingestion config ──────────────────────────────────────────────────────
     ingestion_config: str = Field(
-        default="config/ingestion.yaml", alias="INGESTION_CONFIG"
+        default="config/ingestion.json", alias="INGESTION_CONFIG"
     )
 
 
