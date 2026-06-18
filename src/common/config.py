@@ -29,6 +29,19 @@ class Settings(BaseSettings):
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
+    # ── Ollama LLM ───────────────────────────────────────────────────────────
+    # Ollama exposes an OpenAI-compatible API — no key required for local use.
+    # In Docker Compose OLLAMA_BASE_URL is overridden to http://ollama:11434/v1.
+    ollama_base_url: str = Field(
+        default="http://localhost:11434/v1", alias="OLLAMA_BASE_URL"
+    )
+    ollama_model: str = Field(default="llama3.1", alias="OLLAMA_MODEL")
+
+    @property
+    def llm_enabled(self) -> bool:
+        """Always True — Ollama needs no key. Fallback fires if server is unreachable."""
+        return bool(self.ollama_base_url)
+
     # ── Application ───────────────────────────────────────────────────────────
     app_env: str = Field(default="development", alias="APP_ENV")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

@@ -20,6 +20,35 @@ services:
       retries: 5
       start_period: 10s
 
+  # ── Ollama — local LLM server ──────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama   # model weights persist across restarts
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 30s
+
+  # ── ollama-init — pulls the model once and exits ──────────────────────────
+  # Runs after ollama is healthy; API starts in parallel and uses fallback
+  # responses until the model download completes (typically 5–15 minutes on
+  # first run). Subsequent starts skip the pull if the model is cached.
+  ollama-init:
+    image: ollama/ollama
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["ollama", "pull", "${OLLAMA_MODEL:-llama3.1}"]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    restart: "no"
+
   api:
     build:
       context: .
@@ -27,11 +56,15 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-cpg}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-cpg_analytics}
+      DATABASE_URL:    postgresql+psycopg2://${POSTGRES_USER:-cpg}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-cpg_analytics}
+      OLLAMA_BASE_URL: http://ollama:11434/v1
+      OLLAMA_MODEL:    ${OLLAMA_MODEL:-llama3.1}
     ports:
       - "8000:8000"
     depends_on:
       postgres:
+        condition: service_healthy
+      ollama:
         condition: service_healthy
     volumes:
       - ./data:/app/data
@@ -52,3 +85,4 @@ services:
 
 volumes:
   pg_data:
+  ollama_data:
