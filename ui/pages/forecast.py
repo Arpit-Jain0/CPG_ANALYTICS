@@ -223,7 +223,7 @@ line = (
     )
 )
 
-chart = (band + line).properties(height=380).interactive()
+chart = (band + line).properties(height=380)
 st.altair_chart(chart, use_container_width=True)
 
 st.caption(
