@@ -39,7 +39,8 @@ from loguru import logger
 from prophet import Prophet
 from sqlalchemy import text
 
-from src.common.db import engine as _db_engine, get_session
+from src.common.db import engine as _db_engine
+from src.common.db import get_session
 
 # Silence Prophet / cmdstanpy noise; loguru handles our own messages.
 logging.getLogger("prophet").setLevel(logging.ERROR)
