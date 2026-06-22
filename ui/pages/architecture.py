@@ -31,7 +31,7 @@ with tab_combined:
     st.subheader("Full Platform — End to End")
     st.markdown(
         "Data flows left to right: raw Excel files → ingestion pipeline → "
-        "database + CSV files → forecasting → API → UI."
+        "database tables → forecasting → API → UI."
     )
 
     combined_dot = """
@@ -71,7 +71,6 @@ digraph CPG {
         pg_raw [label="Raw Tables\n(PostgreSQL)", fillcolor="#fef08a", color="#ca8a04"]
         pg_cur [label="Curated Tables\n(PostgreSQL)", fillcolor="#fef08a", color="#ca8a04"]
         pg_err [label="Rejected Rows\n(PostgreSQL)", fillcolor="#fca5a5", color="#dc2626"]
-        csvs   [label="Downstream CSVs", fillcolor="#fef08a", color="#ca8a04"]
     }
 
     subgraph cluster_forecast {
@@ -113,14 +112,12 @@ digraph CPG {
     pipe -> pg_raw [label=" raw"]
     pipe -> pg_cur [label=" clean"]
     pipe -> pg_err [label=" rejected", color="#dc2626"]
-    pipe -> csvs   [label=" CSV"]
 
-    csvs   -> prophet
+    pg_cur -> prophet
     prophet -> fc_tbl
 
-    csvs   -> api
+    pg_cur -> api
     fc_tbl -> api
-    pg_cur -> api [style=dashed]
     ollama -> api
 
     api -> ui [label=" JSON"]
@@ -142,9 +139,9 @@ digraph CPG {
         st.markdown("##### Data layers")
         st.markdown("""
 - **Raw tables** — immutable copy of every ingested row as-is
-- **Curated tables** — typed, validated, deduplicated records
+- **Curated tables** — typed, validated, deduplicated records read by the API and forecaster
 - **Rejected rows** — DQ violations stored separately for audit
-- **Downstream CSVs** — clean flat files read by the API and forecaster
+- **Forecast results** — Prophet predictions stored and served via the API
 """)
     with c3:
         st.markdown("##### Tech stack")
@@ -165,7 +162,7 @@ with tab_ingest:
     st.subheader("Ingestion Pipeline")
     st.markdown(
         "Every Excel file passes through seven ordered stages. "
-        "Clean rows go to the database and downstream CSVs. "
+        "Clean rows go to the curated database tables. "
         "Rejected rows are written to a quality report without touching the main tables."
     )
 
@@ -183,12 +180,11 @@ digraph Ingest {
     s4 [label="4  CLEAN\nFix date formats\nRepair nulls\nNormalise columns", fillcolor="#bbf7d0", color="#15803d"]
     s5 [label="5  DQ CHECK\nDuplicate rows\nDuplicate keys\nDatatype violations", fillcolor="#bbf7d0", color="#15803d"]
     s6 [label="6  MAP\nRename columns\nto canonical names\nDeduplicate batch", fillcolor="#bbf7d0", color="#15803d"]
-    s7 [label="7  WRITE\nInsert into curated tables\nWrite downstream CSV", fillcolor="#bbf7d0", color="#15803d"]
+    s7 [label="7  WRITE\nInsert into curated tables", fillcolor="#bbf7d0", color="#15803d"]
 
     pg_raw [label="Raw Tables\n(PostgreSQL)", shape=cylinder, fillcolor="#fef08a", color="#ca8a04"]
-    pg_err [label="Rejected Rows\n(PostgreSQL)\n+ DQ Report CSV", shape=cylinder, fillcolor="#fca5a5", color="#dc2626"]
+    pg_err [label="Rejected Rows\n(PostgreSQL)\n+ DQ Report", shape=cylinder, fillcolor="#fca5a5", color="#dc2626"]
     pg_cur [label="Curated Tables\n(PostgreSQL)", shape=cylinder, fillcolor="#fef08a", color="#ca8a04"]
-    csv    [label="Downstream CSVs", shape=note, fillcolor="#fef08a", color="#ca8a04"]
 
     cfg [label="ingestion.json\nColumn mapping\nDQ rules\nWrite mode", shape=note, fillcolor="#e0e7ff", color="#4338ca"]
 
@@ -197,7 +193,6 @@ digraph Ingest {
     s3 -> pg_raw [color="#ca8a04"]
     s5 -> pg_err [color="#dc2626", style=dashed, label=" rejected"]
     s7 -> pg_cur [color="#ca8a04"]
-    s7 -> csv    [color="#ca8a04"]
 
     cfg -> s4 [style=dashed, color="#4338ca"]
     cfg -> s6 [style=dashed, color="#4338ca"]
@@ -219,7 +214,7 @@ digraph Ingest {
 | **Clean** | Fixes mixed date formats, repairs null values, normalises column names |
 | **DQ Check** | Runs three checks — duplicate rows, duplicate primary keys, datatype violations |
 | **Map** | Renames source columns to canonical names using the config file, deduplicates within the batch |
-| **Write** | Inserts clean rows into the curated table and writes the downstream CSV |
+| **Write** | Inserts clean rows into the curated table |
 """)
     with col2:
         st.markdown("##### DQ checks")
@@ -263,9 +258,9 @@ digraph Forecast {
         fontname="Arial"
         fontsize=11
 
-        sales [label="Sales Transactions", shape=note, fillcolor="#bfdbfe", color="#2563eb"]
-        promo [label="Promotion Windows", shape=note, fillcolor="#bfdbfe", color="#2563eb"]
-        cal   [label="Holiday Calendar", shape=note, fillcolor="#bfdbfe", color="#2563eb"]
+        sales [label="Sales Transactions\n(curated.sales_transactions)", shape=cylinder, fillcolor="#fef08a", color="#ca8a04"]
+        promo [label="Promotion Windows\n(curated.promo_windows)", shape=cylinder, fillcolor="#fef08a", color="#ca8a04"]
+        cal   [label="Holiday Calendar\n(curated.seasonal_calendar)", shape=cylinder, fillcolor="#fef08a", color="#ca8a04"]
     }
 
     subgraph cluster_prep {
@@ -413,7 +408,7 @@ digraph API {
         bgcolor="#fffbeb"
         fontname="Arial"
 
-        csvs    [label="Downstream CSVs", shape=cylinder, fillcolor="#fef08a", color="#ca8a04"]
+        pg_cur  [label="Curated Tables\n(PostgreSQL)", shape=cylinder, fillcolor="#fef08a", color="#ca8a04"]
         pg_fc   [label="Forecast Results\n(PostgreSQL)", shape=cylinder, fillcolor="#fef08a", color="#ca8a04"]
         pg_audit [label="Load Batches\nQuality Log\n(PostgreSQL)", shape=cylinder, fillcolor="#fef08a", color="#ca8a04"]
         pg_all  [label="All Tables\n(PostgreSQL)", shape=cylinder, fillcolor="#fef08a", color="#ca8a04"]
@@ -434,15 +429,14 @@ digraph API {
     client -> insights
     client -> ask
 
-    summary  -> csvs
-    products -> csvs
+    summary  -> pg_cur
+    products -> pg_cur
     forecast -> pg_fc
     quality  -> pg_audit
     dqr      -> qr_dir
     db_ep    -> pg_all
-    ingest   -> csvs    [style=dashed]
-    insights -> csvs
-    ask      -> csvs
+    insights -> pg_cur
+    ask      -> pg_cur
 
     insights -> ollama  [color="#be185d"]
     ask      -> ollama  [color="#be185d"]

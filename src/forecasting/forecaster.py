@@ -4,23 +4,24 @@ src/forecasting/forecaster.py
 Prophet-based revenue forecaster for CPG Analytics.
 
 For each (category, region) pair:
-  1. Aggregates daily revenue from downstream CSV (sales_transactions.csv),
-     joining through dim_product (category lookup) and dim_store (region lookup).
+  1. Aggregates daily revenue from curated.sales_transactions,
+     joining through curated.dim_product (category lookup) and
+     curated.dim_store (region lookup).
   2. Derives missing revenue for Online rows (unit_price × quantity).
-  3. Feeds US-holiday effects from seasonal_calendar.csv into Prophet.
-  4. Adds a promo regressor (discount_pct / 100) from promo_windows.csv so
-     promo lift is modeled explicitly, not absorbed into residuals.
+  3. Feeds US-holiday effects from curated.seasonal_calendar into Prophet.
+  4. Adds a promo regressor (discount_pct / 100) from curated.promo_windows
+     so promo lift is modeled explicitly, not absorbed into residuals.
   5. Fits Prophet with weekly + yearly seasonality (multiplicative mode).
   6. Writes a horizon-day forecast to the forecast_results Postgres table,
      replacing any prior rows for the same run_date / category / region.
 
-Extension points (data present, not yet wired as regressors):
-    marketing_campaigns.csv  — channel spend; add as regressor in v2
-    competitor_prices.csv    — weekly obs; add as regressor in v2
+Extension points (data present in curated tables, not yet wired as regressors):
+    curated.marketing_campaigns  — channel spend; add as regressor in v2
+    curated.competitor_prices    — weekly obs; add as regressor in v2
 
 Usage
 -----
-    python -m src.forecasting.forecaster [--horizon 90] [--root .]
+    python -m src.forecasting.forecaster [--horizon 90]
 """
 
 from __future__ import annotations
@@ -38,9 +39,7 @@ from loguru import logger
 from prophet import Prophet
 from sqlalchemy import text
 
-from src.common.config import get_settings
-from src.common.db import get_session
-from src.ingestion.config_loader import load_config
+from src.common.db import engine as _db_engine, get_session
 
 # Silence Prophet / cmdstanpy noise; loguru handles our own messages.
 logging.getLogger("prophet").setLevel(logging.ERROR)
@@ -85,39 +84,48 @@ def _ensure_table(session) -> None:
             session.execute(text(stmt))
 
 
-def _downstream_dir(root: Path) -> Path:
-    """Resolve downstream CSV directory from the ingestion config."""
-    cfg_path = root / get_settings().ingestion_config
-    icfg = load_config(cfg_path)
-    return root / icfg.settings.downstream_dir
-
-
 # ── Data loading ──────────────────────────────────────────────────────────────
 
 
-def load_data(downstream_dir: Path) -> dict[str, pd.DataFrame]:
+def load_data() -> dict[str, pd.DataFrame]:
     """
-    Load the five CSVs needed for forecasting.
-    Raises FileNotFoundError if any are absent — run the ingestion pipeline first.
+    Load the five datasets needed for forecasting from curated DB tables.
+    Raises RuntimeError if the DB is unreachable or tables are empty.
+    Run the ingestion pipeline first: python -m src.ingestion.pipeline
     """
-    files = {
-        "sales": "sales_transactions.csv",
-        "products": "dim_product.csv",
-        "stores": "dim_store.csv",
-        "calendar": "seasonal_calendar.csv",
-        "promos": "promo_windows.csv",
+    queries = {
+        "sales": """
+            SELECT transaction_id, transaction_ts, store_id, sku,
+                   quantity, unit_price, revenue, currency, source_system
+            FROM curated.sales_transactions
+        """,
+        "products": "SELECT sku, category, brand FROM curated.dim_product",
+        "stores": "SELECT store_id, region FROM curated.dim_store",
+        "calendar": "SELECT calendar_date, season, is_holiday, holiday_name FROM curated.seasonal_calendar",
+        "promos": "SELECT promo_id, category, region, start_date, end_date, discount_pct FROM curated.promo_windows",
     }
     dfs: dict[str, pd.DataFrame] = {}
-    for key, fname in files.items():
-        path = downstream_dir / fname
-        if not path.exists():
-            raise FileNotFoundError(
-                f"Required CSV not found: {path}\n"
-                "Run the ingestion pipeline first:  "
-                "python -m src.ingestion.pipeline"
-            )
-        dfs[key] = pd.read_csv(path)
-        logger.debug("Loaded {}: {} rows", fname, len(dfs[key]))
+    try:
+        with _db_engine.connect() as conn:
+            for key, sql in queries.items():
+                dfs[key] = pd.read_sql(text(sql), conn)
+                logger.debug("Loaded curated.{}: {} rows", key, len(dfs[key]))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Cannot read from curated DB tables: {exc}\n"
+            "Run the ingestion pipeline first: python -m src.ingestion.pipeline"
+        ) from exc
+
+    # Rename transaction_ts → what build_daily_series expects
+    if "transaction_ts" in dfs["sales"].columns:
+        dfs["sales"] = dfs["sales"].rename(columns={"transaction_ts": "transaction_ts"})
+
+    empty = [k for k, df in dfs.items() if df.empty]
+    if empty:
+        raise RuntimeError(
+            f"Curated tables are empty for: {empty}\n"
+            "Run the ingestion pipeline first: python -m src.ingestion.pipeline"
+        )
     return dfs
 
 
@@ -376,9 +384,10 @@ def write_results(
 
 
 def run_forecasts(
-    root: Path = Path("."),
     horizon_days: int = 90,
     min_history_days: int = MIN_HISTORY_DAYS,
+    # kept for backward compat but unused
+    root: Path = Path("."),
 ) -> None:
     """
     Main entry point.  Fits one Prophet model per (category, region) pair
@@ -386,20 +395,16 @@ def run_forecasts(
 
     Parameters
     ----------
-    root
-        Repo root directory.  Downstream CSVs are resolved via ingestion.json.
     horizon_days
         Calendar days to forecast beyond the last training date.
     min_history_days
         Pairs with fewer unique training dates than this are skipped.
     """
-    root = Path(root).resolve()
     run_date = date.today()
 
-    # ── Load CSVs ────────────────────────────────────────────────────────────
-    ds_dir = _downstream_dir(root)
-    logger.info("Reading data from {}", ds_dir)
-    dfs = load_data(ds_dir)
+    # ── Load from curated DB tables ──────────────────────────────────────────
+    logger.info("Reading data from curated DB tables")
+    dfs = load_data()
 
     daily = build_daily_series(dfs)
     hol_df = build_holidays(dfs["calendar"])
@@ -529,8 +534,9 @@ def _cli() -> None:
         default=MIN_HISTORY_DAYS,
         help=f"Skip series with fewer unique days (default: {MIN_HISTORY_DAYS})",
     )
-    parser.add_argument("--root", default=".", help="Repo root directory (default: cwd)")
     args = parser.parse_args()
+
+    from src.common.config import get_settings
 
     logger.remove()
     logger.add(
@@ -541,7 +547,6 @@ def _cli() -> None:
     )
 
     run_forecasts(
-        root=Path(args.root),
         horizon_days=args.horizon,
         min_history_days=args.min_history,
     )

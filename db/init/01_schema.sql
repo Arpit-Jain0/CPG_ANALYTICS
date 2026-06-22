@@ -325,6 +325,105 @@ CREATE TABLE IF NOT EXISTS curated.product_updates (
 
 CREATE INDEX IF NOT EXISTS idx_cur_prod_upd_sku ON curated.product_updates(sku);
 
+-- ---------------------------------------------------------------------------
+-- curated.dim_region
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS curated.dim_region (
+    region              TEXT        PRIMARY KEY,
+    population          BIGINT,
+    median_income_band  TEXT,
+    climate_zone        TEXT,
+    _load_batch_id      INTEGER     REFERENCES public.load_batch(load_batch_id),
+    _ingested_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
+-- curated.dim_store
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS curated.dim_store (
+    store_id        TEXT        PRIMARY KEY,
+    region          TEXT,
+    city            TEXT,
+    store_type      TEXT,
+    _load_batch_id  INTEGER     REFERENCES public.load_batch(load_batch_id),
+    _ingested_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_cur_dim_store_region ON curated.dim_store(region);
+
+-- ---------------------------------------------------------------------------
+-- curated.dim_product
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS curated.dim_product (
+    sku             TEXT        PRIMARY KEY,
+    category        TEXT,
+    brand           TEXT,
+    package_size    TEXT,
+    list_price      NUMERIC(12, 4),
+    launch_date     DATE,
+    _load_batch_id  INTEGER     REFERENCES public.load_batch(load_batch_id),
+    _ingested_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_cur_dim_product_cat ON curated.dim_product(category);
+
+-- ---------------------------------------------------------------------------
+-- curated.seasonal_calendar
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS curated.seasonal_calendar (
+    calendar_date   DATE        PRIMARY KEY,
+    season          TEXT,
+    is_holiday      TEXT,
+    holiday_name    TEXT,
+    _load_batch_id  INTEGER     REFERENCES public.load_batch(load_batch_id),
+    _ingested_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
+-- curated.promo_windows
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS curated.promo_windows (
+    promo_id        TEXT        PRIMARY KEY,
+    category        TEXT,
+    region          TEXT,
+    start_date      DATE,
+    end_date        DATE,
+    discount_pct    NUMERIC(8, 4),
+    _load_batch_id  INTEGER     REFERENCES public.load_batch(load_batch_id),
+    _ingested_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_cur_promo_cat_reg ON curated.promo_windows(category, region);
+
+-- ---------------------------------------------------------------------------
+-- curated.marketing_campaigns
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS curated.marketing_campaigns (
+    campaign_id     TEXT        PRIMARY KEY,
+    category        TEXT,
+    region          TEXT,
+    channel         TEXT,
+    start_date      DATE,
+    end_date        DATE,
+    exposure        BIGINT,
+    _load_batch_id  INTEGER     REFERENCES public.load_batch(load_batch_id),
+    _ingested_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
+-- curated.competitor_prices
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS curated.competitor_prices (
+    obs_date            DATE,
+    category            TEXT,
+    region              TEXT,
+    competitor_price    NUMERIC(12, 4),
+    _load_batch_id      INTEGER     REFERENCES public.load_batch(load_batch_id),
+    _ingested_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_cur_comp_price_cat_reg ON curated.competitor_prices(category, region);
+
 
 -- =============================================================================
 -- PUBLIC ANALYTICS LAYER  (public.*)

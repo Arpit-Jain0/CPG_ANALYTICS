@@ -2,10 +2,10 @@
 src/api/queries.py
 
 Data-access helpers for the API layer.  All heavy lifting lives here so
-routes stay thin.  Two backends:
+routes stay thin.
 
-  CSV  — reads downstream CSVs for revenue aggregations (summary, insights, ask).
-  DB   — queries Postgres for quality logs, load_batch, and forecast_results.
+All revenue data is read from curated Postgres tables.
+Quality logs, load_batch, and forecast_results are also read from Postgres.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from sqlalchemy import text
 
 from src.common.config import get_settings
 from src.common.db import get_session
-from src.ingestion.config_loader import load_config
+from src.ingestion.config_loader import load_config  # still needed for quality_reports_dir
 
 # ── Root resolution ───────────────────────────────────────────────────────────
 
@@ -31,43 +31,47 @@ def app_root() -> Path:
     return _APP_ROOT
 
 
-def downstream_dir() -> Path:
-    cfg_path = _APP_ROOT / get_settings().ingestion_config
-    icfg = load_config(cfg_path)
-    return _APP_ROOT / icfg.settings.downstream_dir
-
-
 def quality_reports_dir() -> Path:
     cfg_path = _APP_ROOT / get_settings().ingestion_config
     icfg = load_config(cfg_path)
     return _APP_ROOT / icfg.settings.quality_reports_dir
 
 
-# ── CSV loaders ───────────────────────────────────────────────────────────────
+# ── DB loaders ────────────────────────────────────────────────────────────────
 
 
 def _load_sales() -> pd.DataFrame:
-    """Return sales_transactions joined with category (dim_product) and region (dim_store)."""
-    ds = downstream_dir()
+    """
+    Return sales joined with category + brand (dim_product) and region (dim_store)
+    from curated Postgres tables.
+    """
+    sql = text("""
+        SELECT
+            st.transaction_ts,
+            st.store_id,
+            st.sku,
+            st.quantity,
+            st.unit_price,
+            COALESCE(st.revenue, st.unit_price * st.quantity) AS revenue,
+            dp.category,
+            dp.brand,
+            ds.region
+        FROM curated.sales_transactions st
+        LEFT JOIN curated.dim_product dp ON dp.sku = st.sku
+        LEFT JOIN curated.dim_store   ds ON ds.store_id = st.store_id
+        WHERE st.transaction_ts IS NOT NULL
+          AND (
+              st.revenue IS NOT NULL
+              OR (st.unit_price IS NOT NULL AND st.quantity IS NOT NULL)
+          )
+    """)
+    with get_session() as session:
+        result = session.execute(sql)
+        df = pd.DataFrame(result.fetchall(), columns=list(result.keys()))
 
-    sales = pd.read_csv(ds / "sales_transactions.csv", low_memory=False)
-    products = pd.read_csv(ds / "dim_product.csv")[["sku", "category"]].drop_duplicates("sku")
-    stores = pd.read_csv(ds / "dim_store.csv")[["store_id", "region"]].drop_duplicates("store_id")
-
-    sales["ds"] = pd.to_datetime(sales["transaction_ts"], errors="coerce").dt.normalize()
-
-    for col in ("revenue", "unit_price", "quantity"):
-        sales[col] = pd.to_numeric(sales[col], errors="coerce")
-
-    # Derive revenue for ONLINE rows (no amount at source)
-    missing = sales["revenue"].isna()
-    sales.loc[missing, "revenue"] = (
-        sales.loc[missing, "unit_price"] * sales.loc[missing, "quantity"]
-    )
-
-    sales = sales.merge(products, on="sku", how="left")
-    sales = sales.merge(stores, on="store_id", how="left")
-    return sales.dropna(subset=["ds", "revenue"])
+    df["ds"] = pd.to_datetime(df["transaction_ts"], errors="coerce").dt.normalize()
+    df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce")
+    return df.dropna(subset=["ds", "revenue"])
 
 
 # ── Summary queries ───────────────────────────────────────────────────────────
@@ -212,16 +216,6 @@ def get_forecast_rows(
 
 
 # ── Ingest helpers ────────────────────────────────────────────────────────────
-
-
-def _csv_row_counts(csv_paths: list[Path]) -> dict[str, int]:
-    """Count data rows (excluding header) in each CSV that exists."""
-    counts: dict[str, int] = {}
-    for p in csv_paths:
-        if p.exists():
-            with p.open(encoding="utf-8") as f:
-                counts[p.name] = max(0, sum(1 for _ in f) - 1)
-    return counts
 
 
 def run_ingest(mode: str) -> dict[str, Any]:
@@ -402,30 +396,22 @@ def get_product_performance(
     end_date: date | None = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Top products by revenue with brand + category enrichment."""
+    """Top products by revenue with brand + category enrichment from curated tables."""
     df = _load_sales()
     if start_date:
         df = df[df["ds"] >= pd.Timestamp(start_date)]
     if end_date:
         df = df[df["ds"] <= pd.Timestamp(end_date)]
 
-    products_path = downstream_dir() / "dim_product.csv"
-    if products_path.exists():
-        prods = pd.read_csv(products_path)[["sku", "brand", "category"]].drop_duplicates("sku")
-    else:
-        prods = pd.DataFrame(columns=["sku", "brand", "category"])
+    # brand and category come from the _load_sales() JOIN with curated.dim_product
+    prods = df[["sku", "brand", "category"]].drop_duplicates("sku")
 
     by_sku = (
         df.groupby("sku")
         .agg(revenue=("revenue", "sum"), transactions=("revenue", "count"))
         .reset_index()
     )
-    if not prods.empty:
-        by_sku = by_sku.merge(prods, on="sku", how="left")
-    else:
-        by_sku["brand"] = None
-        by_sku["category"] = None
-
+    by_sku = by_sku.merge(prods, on="sku", how="left")
     by_sku = by_sku.sort_values("revenue", ascending=False).head(limit)
 
     return [

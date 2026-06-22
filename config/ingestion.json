@@ -34,7 +34,8 @@
           "write_mode": "overwrite",
           "enabled": true,
           "pk_column": "region",
-          "raw_table": "raw.dim_region"
+          "raw_table": "raw.dim_region",
+          "curated_table": "curated.dim_region"
         },
         {
           "sheet": "dim_store",
@@ -42,7 +43,8 @@
           "write_mode": "overwrite",
           "enabled": true,
           "pk_column": "store_id",
-          "raw_table": "raw.dim_store"
+          "raw_table": "raw.dim_store",
+          "curated_table": "curated.dim_store"
         },
         {
           "sheet": "dim_product",
@@ -50,7 +52,8 @@
           "write_mode": "overwrite",
           "enabled": true,
           "pk_column": "sku",
-          "raw_table": "raw.dim_product"
+          "raw_table": "raw.dim_product",
+          "curated_table": "curated.dim_product"
         },
         {
           "sheet": "seasonal_calendar",
@@ -58,7 +61,8 @@
           "write_mode": "overwrite",
           "enabled": true,
           "pk_column": "calendar_date",
-          "raw_table": "raw.seasonal_calendar"
+          "raw_table": "raw.seasonal_calendar",
+          "curated_table": "curated.seasonal_calendar"
         }
       ]
     },
@@ -76,7 +80,8 @@
           "write_mode": "overwrite",
           "enabled": true,
           "pk_column": "promo_id",
-          "raw_table": "raw.promo_windows"
+          "raw_table": "raw.promo_windows",
+          "curated_table": "curated.promo_windows"
         }
       ]
     },
@@ -94,7 +99,8 @@
           "write_mode": "overwrite",
           "enabled": true,
           "pk_column": "campaign_id",
-          "raw_table": "raw.marketing_campaigns"
+          "raw_table": "raw.marketing_campaigns",
+          "curated_table": "curated.marketing_campaigns"
         }
       ]
     },
@@ -111,7 +117,8 @@
           "target_csv": "competitor_prices.csv",
           "write_mode": "overwrite",
           "enabled": true,
-          "raw_table": "raw.competitor_prices"
+          "raw_table": "raw.competitor_prices",
+          "curated_table": "curated.competitor_prices"
         }
       ]
     },
