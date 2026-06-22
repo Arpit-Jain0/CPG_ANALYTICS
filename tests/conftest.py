@@ -229,10 +229,16 @@ def db_engine():
     schema_path = Path(__file__).resolve().parents[1] / "db" / "init" / "01_schema.sql"
     ddl = schema_path.read_text(encoding="utf-8")
 
+    def _has_sql(fragment: str) -> bool:
+        return any(
+            line.strip() and not line.strip().startswith("--")
+            for line in fragment.splitlines()
+        )
+
     with engine.connect() as conn:
         for stmt in ddl.split(";"):
             stmt = stmt.strip()
-            if stmt:
+            if stmt and _has_sql(stmt):
                 conn.execute(text(stmt))
         conn.commit()
 
