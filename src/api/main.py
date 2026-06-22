@@ -9,14 +9,26 @@ Start locally:
 Or via Docker Compose:
     docker compose --profile full up
 """
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from loguru import logger
 
+from src.api.routes import (
+    ask,
+    database,
+    dq_reports,
+    forecast,
+    generate,
+    health,
+    ingest,
+    insights,
+    quality,
+    summary,
+)
 from src.common.db import ping
-from src.api.routes import ask, forecast, health, ingest, insights, quality, summary
 
 
 @asynccontextmanager
@@ -54,3 +66,6 @@ app.include_router(quality.router, tags=["Analytics"])
 app.include_router(forecast.router, tags=["Analytics"])
 app.include_router(insights.router, tags=["AI"])
 app.include_router(ask.router, tags=["AI"])
+app.include_router(dq_reports.router, tags=["Data Quality"])
+app.include_router(generate.router, tags=["Operations"])
+app.include_router(database.router, tags=["Database"])

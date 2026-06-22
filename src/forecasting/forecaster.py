@@ -22,6 +22,7 @@ Usage
 -----
     python -m src.forecasting.forecaster [--horizon 90] [--root .]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -49,8 +50,8 @@ warnings.filterwarnings("ignore", message="No seasonality parameters")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-MIN_HISTORY_DAYS: int = 60    # skip series shorter than this
-MODEL_VERSION:    str = "prophet-v1"
+MIN_HISTORY_DAYS: int = 60  # skip series shorter than this
+MODEL_VERSION: str = "prophet-v1"
 
 _FC_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS forecast_results (
@@ -70,10 +71,11 @@ CREATE INDEX IF NOT EXISTS idx_fc_run    ON forecast_results (run_date, category
 CREATE INDEX IF NOT EXISTS idx_fc_target ON forecast_results (category, region, target_date);
 """
 
-_CHUNK = 500   # rows per executemany call
+_CHUNK = 500  # rows per executemany call
 
 
 # ── Setup helpers ─────────────────────────────────────────────────────────────
+
 
 def _ensure_table(session) -> None:
     """Create forecast_results table + indexes if they do not exist."""
@@ -92,17 +94,18 @@ def _downstream_dir(root: Path) -> Path:
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
+
 def load_data(downstream_dir: Path) -> dict[str, pd.DataFrame]:
     """
     Load the five CSVs needed for forecasting.
     Raises FileNotFoundError if any are absent — run the ingestion pipeline first.
     """
     files = {
-        "sales":    "sales_transactions.csv",
+        "sales": "sales_transactions.csv",
         "products": "dim_product.csv",
-        "stores":   "dim_store.csv",
+        "stores": "dim_store.csv",
         "calendar": "seasonal_calendar.csv",
-        "promos":   "promo_windows.csv",
+        "promos": "promo_windows.csv",
     }
     dfs: dict[str, pd.DataFrame] = {}
     for key, fname in files.items():
@@ -119,6 +122,7 @@ def load_data(downstream_dir: Path) -> dict[str, pd.DataFrame]:
 
 
 # ── Daily series construction ─────────────────────────────────────────────────
+
 
 def build_daily_series(dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """
@@ -172,6 +176,7 @@ def build_daily_series(dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 # ── Holiday calendar ──────────────────────────────────────────────────────────
 
+
 def build_holidays(calendar_df: pd.DataFrame) -> pd.DataFrame:
     """
     Convert seasonal_calendar rows into Prophet's holidays DataFrame format.
@@ -193,13 +198,14 @@ def build_holidays(calendar_df: pd.DataFrame) -> pd.DataFrame:
 
     hol["holiday"] = hol["holiday_name"].fillna("US_Holiday").str.strip()
     hol["lower_window"] = 0
-    hol["upper_window"] = 1   # extend effect one day past the holiday
+    hol["upper_window"] = 1  # extend effect one day past the holiday
 
     logger.info("Holiday calendar: {} holiday-days loaded", len(hol))
     return hol[["holiday", "ds", "lower_window", "upper_window"]].reset_index(drop=True)
 
 
 # ── Promo regressor ───────────────────────────────────────────────────────────
+
 
 def build_promo_feature(
     promo_df: pd.DataFrame,
@@ -217,19 +223,18 @@ def build_promo_feature(
     """
     result = pd.Series(0.0, index=date_index, name="promo_active")
 
-    mask = (
-        (promo_df["category"].str.strip().str.lower() == category.lower()) &
-        (promo_df["region"].str.strip().str.lower() == region.lower())
+    mask = (promo_df["category"].str.strip().str.lower() == category.lower()) & (
+        promo_df["region"].str.strip().str.lower() == region.lower()
     )
     cat_promos = promo_df[mask].copy()
     if cat_promos.empty:
         return result
 
     cat_promos["start_date"] = pd.to_datetime(cat_promos["start_date"], errors="coerce")
-    cat_promos["end_date"]   = pd.to_datetime(cat_promos["end_date"],   errors="coerce")
-    cat_promos["discount_pct"] = pd.to_numeric(
-        cat_promos["discount_pct"], errors="coerce"
-    ).fillna(0)
+    cat_promos["end_date"] = pd.to_datetime(cat_promos["end_date"], errors="coerce")
+    cat_promos["discount_pct"] = pd.to_numeric(cat_promos["discount_pct"], errors="coerce").fillna(
+        0
+    )
 
     for _, row in cat_promos.iterrows():
         if pd.isna(row["start_date"]) or pd.isna(row["end_date"]):
@@ -244,10 +249,11 @@ def build_promo_feature(
 
 # ── Prophet fit + forecast ────────────────────────────────────────────────────
 
+
 def fit_and_forecast(
     train_df: pd.DataFrame,
     holidays_df: pd.DataFrame,
-    promo_lookup: dict,          # ds → promo_active value for full date range
+    promo_lookup: dict,  # ds → promo_active value for full date range
     horizon_days: int,
 ) -> tuple[pd.DataFrame | None, str | None]:
     """
@@ -311,10 +317,8 @@ def fit_and_forecast(
 
     # Keep only the future portion; clip negatives to 0 (revenue can't be negative)
     max_train = train["ds"].max()
-    fut = forecast[forecast["ds"] > max_train][
-        ["ds", "yhat", "yhat_lower", "yhat_upper"]
-    ].copy()
-    fut["yhat"]       = fut["yhat"].clip(lower=0.0)
+    fut = forecast[forecast["ds"] > max_train][["ds", "yhat", "yhat_lower", "yhat_upper"]].copy()
+    fut["yhat"] = fut["yhat"].clip(lower=0.0)
     fut["yhat_lower"] = fut["yhat_lower"].clip(lower=0.0)
     fut["yhat_upper"] = fut["yhat_upper"].clip(lower=0.0)
 
@@ -322,6 +326,7 @@ def fit_and_forecast(
 
 
 # ── DB write ──────────────────────────────────────────────────────────────────
+
 
 def write_results(
     session,
@@ -369,6 +374,7 @@ def write_results(
 
 # ── Orchestration ─────────────────────────────────────────────────────────────
 
+
 def run_forecasts(
     root: Path = Path("."),
     horizon_days: int = 90,
@@ -395,7 +401,7 @@ def run_forecasts(
     logger.info("Reading data from {}", ds_dir)
     dfs = load_data(ds_dir)
 
-    daily  = build_daily_series(dfs)
+    daily = build_daily_series(dfs)
     hol_df = build_holidays(dfs["calendar"])
 
     # ── Ensure DB table exists ────────────────────────────────────────────────
@@ -414,45 +420,48 @@ def run_forecasts(
         .agg(n_days=("ds", "nunique"), last_date=("ds", "max"))
         .reset_index()
     )
-    logger.info("Forecasting {} (category, region) pairs | horizon={} days", len(pairs), horizon_days)
+    logger.info(
+        "Forecasting {} (category, region) pairs | horizon={} days", len(pairs), horizon_days
+    )
 
     total_written = 0
     skipped = 0
 
     for _, p in pairs.iterrows():
         category = p["category"]
-        region   = p["region"]
-        n_days   = int(p["n_days"])
+        region = p["region"]
+        n_days = int(p["n_days"])
 
         if n_days < min_history_days:
             logger.warning(
                 "SKIP ({}, {}) — only {} unique training dates (min {})",
-                category, region, n_days, min_history_days,
+                category,
+                region,
+                n_days,
+                min_history_days,
             )
             skipped += 1
             continue
 
         # Training series for this pair
-        series = daily[
-            (daily["category"] == category) & (daily["region"] == region)
-        ].copy()
+        series = daily[(daily["category"] == category) & (daily["region"] == region)].copy()
 
         # Promo regressor — build for training + full forecast window
         first_date = series["ds"].min()
-        last_date  = series["ds"].max()
-        extended   = pd.date_range(
+        last_date = series["ds"].max()
+        extended = pd.date_range(
             start=first_date,
             end=last_date + timedelta(days=horizon_days),
             freq="D",
         )
-        promo_feat   = build_promo_feature(dfs["promos"], category, region, extended)
-        promo_lookup = dict(zip(extended, promo_feat.values))
-
-        has_promo_in_train = promo_feat.loc[promo_feat.index <= last_date].sum() > 0
+        promo_feat = build_promo_feature(dfs["promos"], category, region, extended)
+        promo_lookup = dict(zip(extended, promo_feat.values, strict=False))
 
         logger.info(
             "({:14s}, {:10s})  {} training days | promo_days={}",
-            category, region, n_days,
+            category,
+            region,
+            n_days,
             int((promo_feat.loc[promo_feat.index <= last_date] > 0).sum()),
         )
 
@@ -466,14 +475,14 @@ def run_forecasts(
         # Build DB rows
         db_rows = [
             {
-                "run_date":          run_date,
-                "category":          category,
-                "region":            region,
-                "target_date":       row["ds"].date(),
-                "predicted_revenue": round(float(row["yhat"]),       4),
-                "yhat_lower":        round(float(row["yhat_lower"]), 4),
-                "yhat_upper":        round(float(row["yhat_upper"]), 4),
-                "model_version":     MODEL_VERSION,
+                "run_date": run_date,
+                "category": category,
+                "region": region,
+                "target_date": row["ds"].date(),
+                "predicted_revenue": round(float(row["yhat"]), 4),
+                "yhat_lower": round(float(row["yhat_lower"]), 4),
+                "yhat_upper": round(float(row["yhat_upper"]), 4),
+                "model_version": MODEL_VERSION,
             }
             for _, row in forecast.iterrows()
         ]
@@ -485,17 +494,22 @@ def run_forecasts(
         logger.info(
             "  wrote {} points | yhat {:.0f}–{:.0f} | interval [{:.0f}, {:.0f}]",
             n,
-            forecast["yhat"].min(), forecast["yhat"].max(),
-            forecast["yhat_lower"].min(), forecast["yhat_upper"].max(),
+            forecast["yhat"].min(),
+            forecast["yhat"].max(),
+            forecast["yhat_lower"].min(),
+            forecast["yhat_upper"].max(),
         )
 
     logger.info(
         "Done — {} pairs written ({} rows total), {} skipped",
-        len(pairs) - skipped, total_written, skipped,
+        len(pairs) - skipped,
+        total_written,
+        skipped,
     )
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
+
 
 def _cli() -> None:
     parser = argparse.ArgumentParser(
@@ -508,12 +522,14 @@ def _cli() -> None:
             "  python -m src.forecasting.forecaster --root /data/project\n"
         ),
     )
-    parser.add_argument("--horizon",     type=int, default=90,
-                        help="Days to forecast (default: 90)")
-    parser.add_argument("--min-history", type=int, default=MIN_HISTORY_DAYS,
-                        help=f"Skip series with fewer unique days (default: {MIN_HISTORY_DAYS})")
-    parser.add_argument("--root",        default=".",
-                        help="Repo root directory (default: cwd)")
+    parser.add_argument("--horizon", type=int, default=90, help="Days to forecast (default: 90)")
+    parser.add_argument(
+        "--min-history",
+        type=int,
+        default=MIN_HISTORY_DAYS,
+        help=f"Skip series with fewer unique days (default: {MIN_HISTORY_DAYS})",
+    )
+    parser.add_argument("--root", default=".", help="Repo root directory (default: cwd)")
     args = parser.parse_args()
 
     logger.remove()

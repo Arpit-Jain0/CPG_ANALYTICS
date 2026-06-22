@@ -10,7 +10,9 @@ router = APIRouter()
 @router.get("/forecast", response_model=ForecastResponse)
 def forecast(
     category: str | None = Query(default=None, description="Filter by product category"),
-    region: str | None = Query(default=None, description="Filter by region (MIDWEST, NORTHEAST, …)"),
+    region: str | None = Query(
+        default=None, description="Filter by region (MIDWEST, NORTHEAST, …)"
+    ),
     horizon: int = Query(default=90, ge=1, le=365, description="Max forecast days to return"),
 ) -> ForecastResponse:
     """
@@ -32,10 +34,7 @@ def forecast(
     if not data["points"]:
         raise HTTPException(
             status_code=404,
-            detail=(
-                "No forecast rows found. "
-                "Run: python -m src.forecasting.forecaster"
-            ),
+            detail=("No forecast rows found. " "Run: python -m src.forecasting.forecaster"),
         )
 
     return ForecastResponse(

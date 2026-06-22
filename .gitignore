@@ -30,10 +30,12 @@ htmlcov/
 
 # Data outputs (generated; not version-controlled)
 data/output/processed/*
+data/output/downstream/*
 data/output/quality_reports/*
 data/output/archive/*
 # Keep folder structure
 !data/output/processed/.gitkeep
+!data/output/downstream/.gitkeep
 !data/output/quality_reports/.gitkeep
 !data/output/archive/.gitkeep
 

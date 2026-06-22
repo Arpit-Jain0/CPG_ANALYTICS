@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -e ".[dev]" || pip install --no-cache-dir -e .
 # Copy source tree
 COPY src/ ./src/
 COPY config/ ./config/
+COPY scripts/ ./scripts/
 
 # data/input is expected to be bind-mounted at runtime (see docker-compose volumes)
 # data/output/downstream is also bind-mounted — no COPY needed

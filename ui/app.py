@@ -7,6 +7,7 @@ Run locally:
 In Docker:
     Set API_BASE_URL=http://api:8000 via env or .env
 """
+
 import sys
 from pathlib import Path
 
@@ -26,15 +27,24 @@ st.set_page_config(
 
 pg = st.navigation(
     {
+        "Home": [
+            st.Page("pages/home.py", title="Home", icon="🏠"),
+        ],
         "Analytics": [
-            st.Page("pages/dashboard.py",  title="Dashboard",      icon="📊"),
-            st.Page("pages/forecast.py",   title="Forecast",       icon="📈"),
+            st.Page("pages/dashboard.py", title="Dashboard", icon="📊"),
+            st.Page("pages/forecast.py", title="Forecast", icon="📈"),
         ],
         "AI": [
-            st.Page("pages/insights.py",   title="AI Insights & Q&A", icon="🤖"),
+            st.Page("pages/insights.py", title="AI Insights & Q&A", icon="🤖"),
+        ],
+        "Data Quality": [
+            st.Page("pages/dq_reports.py", title="DQ Reports", icon="🛡"),
         ],
         "Operations": [
-            st.Page("pages/data_loads.py", title="Data Loads",     icon="🔄"),
+            st.Page("pages/data_loads.py", title="Data Loads", icon="🔄"),
+            st.Page("pages/database.py", title="Database Explorer", icon="🗄️"),
+            st.Page("pages/architecture.py", title="Architecture & Flow", icon="🏗️"),
+            st.Page("pages/test_coverage.py", title="Test Coverage", icon="🧪"),
         ],
     }
 )

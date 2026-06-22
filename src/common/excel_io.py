@@ -8,6 +8,7 @@ Robust .xlsx reader that handles:
                              NOT assumed to be row 1.
   • Formula cells          — opened with data_only=True so cached values are used.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,8 +17,8 @@ import openpyxl
 import pandas as pd
 from loguru import logger
 
-
 # ── Ghost-sheet detection ─────────────────────────────────────────────────────
+
 
 def _is_ghost(ws) -> bool:
     """True when a worksheet has no usable content."""
@@ -34,6 +35,7 @@ def _is_ghost(ws) -> bool:
 
 # ── Header-row detection ──────────────────────────────────────────────────────
 
+
 def _find_header_row(ws, max_scan: int = 15) -> int:
     """
     Return the 0-indexed row index of the real header row within the first
@@ -46,8 +48,7 @@ def _find_header_row(ws, max_scan: int = 15) -> int:
     limit = min(max_scan, ws.max_row or 1)
     for row_idx in range(limit):
         cells = [
-            ws.cell(row=row_idx + 1, column=c).value
-            for c in range(1, (ws.max_column or 1) + 1)
+            ws.cell(row=row_idx + 1, column=c).value for c in range(1, (ws.max_column or 1) + 1)
         ]
         non_null = [v for v in cells if v is not None and str(v).strip() != ""]
         if len(non_null) > best_count:
@@ -57,6 +58,7 @@ def _find_header_row(ws, max_scan: int = 15) -> int:
 
 
 # ── Worksheet → DataFrame ─────────────────────────────────────────────────────
+
 
 def _ws_to_df(ws, header_row: int) -> pd.DataFrame:
     """
@@ -69,15 +71,13 @@ def _ws_to_df(ws, header_row: int) -> pd.DataFrame:
         return pd.DataFrame()
 
     raw_header = all_rows[0]
-    columns = [
-        str(c).strip() if c is not None else f"_col{i}"
-        for i, c in enumerate(raw_header)
-    ]
+    columns = [str(c).strip() if c is not None else f"_col{i}" for i, c in enumerate(raw_header)]
     data = all_rows[1:]
     return pd.DataFrame(data, columns=columns)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
 
 def read_workbook(
     path: Path,
@@ -109,8 +109,7 @@ def read_workbook(
     for name in sheets_to_process:
         if name not in wb.sheetnames:
             raise KeyError(
-                f"Sheet '{name}' not found in '{path.name}'. "
-                f"Available sheets: {wb.sheetnames}"
+                f"Sheet '{name}' not found in '{path.name}'. " f"Available sheets: {wb.sheetnames}"
             )
         ws = wb[name]
 
@@ -122,19 +121,25 @@ def read_workbook(
         if header_row > 0:
             logger.info(
                 "Title row detected in '{}!{}' — treating Excel row {} as header",
-                path.name, name, header_row + 1,
+                path.name,
+                name,
+                header_row + 1,
             )
 
         df = _ws_to_df(ws, header_row)
         if df.empty:
-            logger.debug("Sheet '{}' in '{}' produced an empty DataFrame — skipping",
-                         name, path.name)
+            logger.debug(
+                "Sheet '{}' in '{}' produced an empty DataFrame — skipping", name, path.name
+            )
             continue
 
         result[name] = df
         logger.debug(
             "Read '{}!{}': {} rows × {} cols",
-            path.name, name, len(df), len(df.columns),
+            path.name,
+            name,
+            len(df),
+            len(df.columns),
         )
 
     wb.close()

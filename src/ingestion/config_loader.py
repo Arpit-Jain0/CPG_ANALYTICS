@@ -4,6 +4,7 @@ src/ingestion/config_loader.py
 Loads config/ingestion.json into typed dataclasses.
 No Pydantic overhead — plain stdlib dataclasses + json.
 """
+
 from __future__ import annotations
 
 import json
@@ -16,15 +17,22 @@ from typing import Any
 class SheetConfig:
     """Routing rule for one worksheet (or '*' for all sheets in the file)."""
 
-    sheet: str                              # exact sheet name or "*" (match all)
-    target_csv: str                         # output filename in downstream_dir
-    write_mode: str = "append"             # "overwrite" | "append"
+    sheet: str  # exact sheet name or "*" (match all)
+    target_csv: str  # output filename in downstream_dir
+    write_mode: str = "append"  # "overwrite" | "append"
     enabled: bool = True
     column_map: dict[str, str] = field(default_factory=dict)
     # Static columns to inject; value=None means use the source filename at runtime
     add_columns: dict[str, Any] = field(default_factory=dict)
     # Optional: deduplicate rows on this column before writing
     dedup_column: str | None = None
+    # DQ pre-check: logical primary key column (post-clean lowercased name)
+    pk_column: str | None = None
+    # DQ pre-check: column → rule; rules: "numeric" | "positive_numeric" | "datetime"
+    datatype_rules: dict[str, str] = field(default_factory=dict)
+    # Postgres target tables (schema.table notation); None = skip DB write for this sheet
+    raw_table: str | None = None  # e.g. "raw.pos_transactions"
+    curated_table: str | None = None  # e.g. "curated.sales_transactions"
 
 
 @dataclass
@@ -32,8 +40,8 @@ class FileGroup:
     """A logical group of files that share the same routing rules."""
 
     name: str
-    dir: str                                # relative path from repo root
-    file_pattern: str                       # glob — e.g. "*.xlsx", "*pos*.xlsx"
+    dir: str  # relative path from repo root
+    file_pattern: str  # glob — e.g. "*.xlsx", "*pos*.xlsx"
     sheets: list[SheetConfig]
     description: str = ""
     enabled: bool = True
@@ -47,6 +55,8 @@ class PipelineSettings:
     )
     date_formats: list[str] = field(default_factory=list)
     downstream_dir: str = "data/output/downstream"
+    quality_reports_dir: str = "data/output/quality_reports"
+    archive_dir: str = "data/archive"
 
 
 @dataclass
@@ -68,9 +78,13 @@ def load_config(path: Path | str) -> IngestionConfig:
     _s = raw.get("settings", {})
     settings = PipelineSettings(
         header_scan_rows=_s.get("header_scan_rows", 15),
-        null_values=_s.get("null_values", PipelineSettings.__dataclass_fields__["null_values"].default_factory()),
+        null_values=_s.get(
+            "null_values", PipelineSettings.__dataclass_fields__["null_values"].default_factory()
+        ),
         date_formats=_s.get("date_formats", []),
         downstream_dir=_s.get("downstream_dir", "data/output/downstream"),
+        quality_reports_dir=_s.get("quality_reports_dir", "data/output/quality_reports"),
+        archive_dir=_s.get("archive_dir", "data/archive"),
     )
 
     groups: list[FileGroup] = []
@@ -86,6 +100,10 @@ def load_config(path: Path | str) -> IngestionConfig:
                     column_map=s.get("column_map", {}),
                     add_columns=s.get("add_columns", {}),
                     dedup_column=s.get("dedup_column"),
+                    pk_column=s.get("pk_column"),
+                    datatype_rules=s.get("datatype_rules", {}),
+                    raw_table=s.get("raw_table"),
+                    curated_table=s.get("curated_table"),
                 )
             )
         groups.append(

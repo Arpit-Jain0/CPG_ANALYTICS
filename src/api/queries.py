@@ -7,6 +7,7 @@ routes stay thin.  Two backends:
   CSV  — reads downstream CSVs for revenue aggregations (summary, insights, ask).
   DB   — queries Postgres for quality logs, load_batch, and forecast_results.
 """
+
 from __future__ import annotations
 
 from datetime import date, datetime
@@ -16,8 +17,8 @@ from typing import Any
 import pandas as pd
 from sqlalchemy import text
 
-from src.common.db import get_session
 from src.common.config import get_settings
+from src.common.db import get_session
 from src.ingestion.config_loader import load_config
 
 # ── Root resolution ───────────────────────────────────────────────────────────
@@ -36,7 +37,14 @@ def downstream_dir() -> Path:
     return _APP_ROOT / icfg.settings.downstream_dir
 
 
+def quality_reports_dir() -> Path:
+    cfg_path = _APP_ROOT / get_settings().ingestion_config
+    icfg = load_config(cfg_path)
+    return _APP_ROOT / icfg.settings.quality_reports_dir
+
+
 # ── CSV loaders ───────────────────────────────────────────────────────────────
+
 
 def _load_sales() -> pd.DataFrame:
     """Return sales_transactions joined with category (dim_product) and region (dim_store)."""
@@ -64,6 +72,7 @@ def _load_sales() -> pd.DataFrame:
 
 # ── Summary queries ───────────────────────────────────────────────────────────
 
+
 def get_revenue_kpis(
     start_date: date | None = None,
     end_date: date | None = None,
@@ -86,9 +95,7 @@ def get_revenue_kpis(
         "by_category": [
             {"category": str(k), "revenue": round(float(v), 2)} for k, v in by_cat.items()
         ],
-        "by_region": [
-            {"region": str(k), "revenue": round(float(v), 2)} for k, v in by_reg.items()
-        ],
+        "by_region": [{"region": str(k), "revenue": round(float(v), 2)} for k, v in by_reg.items()],
         "start_date": start_date,
         "end_date": end_date,
     }
@@ -96,44 +103,35 @@ def get_revenue_kpis(
 
 # ── Quality queries (DB) ──────────────────────────────────────────────────────
 
+
 def get_quality_summary() -> dict[str, Any]:
     with get_session() as session:
-        issues = session.execute(
-            text("""
+        issues = session.execute(text("""
                 SELECT issue_type, count(*) AS cnt
                 FROM data_quality_log
                 GROUP BY issue_type
                 ORDER BY cnt DESC
-            """)
-        ).fetchall()
+            """)).fetchall()
 
-        actions = session.execute(
-            text("""
+        actions = session.execute(text("""
                 SELECT action_taken, count(*) AS cnt
                 FROM data_quality_log
                 GROUP BY action_taken
                 ORDER BY cnt DESC
-            """)
-        ).fetchall()
+            """)).fetchall()
 
-        total = session.execute(
-            text("SELECT count(*) FROM data_quality_log")
-        ).scalar()
+        total = session.execute(text("SELECT count(*) FROM data_quality_log")).scalar()
 
-        total_batches = session.execute(
-            text("SELECT count(*) FROM load_batch")
-        ).scalar()
+        total_batches = session.execute(text("SELECT count(*) FROM load_batch")).scalar()
 
-        latest = session.execute(
-            text("""
+        latest = session.execute(text("""
                 SELECT load_batch_id, load_type, source_file,
                        rows_in, inserted, deduped, rejected,
                        repaired, flagged, late_arriving
                 FROM load_batch
                 ORDER BY load_batch_id DESC
                 LIMIT 1
-            """)
-        ).fetchone()
+            """)).fetchone()
 
     return {
         "total_issues": int(total or 0),
@@ -145,6 +143,7 @@ def get_quality_summary() -> dict[str, Any]:
 
 
 # ── Forecast queries (DB) ─────────────────────────────────────────────────────
+
 
 def get_forecast_rows(
     category: str | None,
@@ -214,6 +213,7 @@ def get_forecast_rows(
 
 # ── Ingest helpers ────────────────────────────────────────────────────────────
 
+
 def _csv_row_counts(csv_paths: list[Path]) -> dict[str, int]:
     """Count data rows (excluding header) in each CSV that exists."""
     counts: dict[str, int] = {}
@@ -232,8 +232,7 @@ def run_ingest(mode: str) -> dict[str, Any]:
     mode = "historical" → groups whose dir contains "historical"
     mode = "incremental" → groups whose dir contains "incremental"
     """
-    from datetime import datetime
-    from src.ingestion.config_loader import load_config, IngestionConfig
+    from src.ingestion.config_loader import IngestionConfig, load_config
     from src.ingestion.pipeline import run_pipeline
 
     root = app_root()
@@ -251,68 +250,77 @@ def run_ingest(mode: str) -> dict[str, Any]:
 
     filtered = IngestionConfig(settings=config.settings, file_groups=matched)
 
-    # Target CSVs affected by this run
-    ds = root / config.settings.downstream_dir
-    target_csvs = list({
-        ds / s.target_csv
-        for g in matched
-        for s in g.sheets
-        if s.enabled
-    })
-
-    # Row snapshot before
-    before = _csv_row_counts(target_csvs)
-
-    # File count
+    # File count (before running so spinner covers the wait)
     files_processed = sum(
-        len(list((root / g.dir).glob(g.file_pattern)))
-        for g in matched
-        if (root / g.dir).exists()
+        len(list((root / g.dir).glob(g.file_pattern))) for g in matched if (root / g.dir).exists()
     )
 
-    started_at = datetime.utcnow()
-    run_pipeline(root, filtered)
-    finished_at = datetime.utcnow()
-
-    # Delta rows
-    after = _csv_row_counts(target_csvs)
-    inserted = sum(
-        max(0, after.get(p.name, 0) - before.get(p.name, 0))
-        for p in target_csvs
-    )
-
-    # Write load_batch record
+    # Write load_batch record BEFORE pipeline so pipeline rows can reference it
     load_batch_id: int | None = None
+    started_at = datetime.utcnow()
     try:
         with get_session() as session:
-            result = session.execute(
+            lb_result = session.execute(
                 text("""
                     INSERT INTO load_batch
-                        (load_type, source_file, started_at, finished_at, inserted)
+                        (load_type, source_file, started_at, inserted)
                     VALUES
-                        (:load_type, :source_file, :started_at, :finished_at, :inserted)
+                        (:load_type, :source_file, :started_at, 0)
                     RETURNING load_batch_id
                 """),
                 {
                     "load_type": mode.upper(),
                     "source_file": f"{len(matched)} group(s)",
                     "started_at": started_at,
-                    "finished_at": finished_at,
-                    "inserted": inserted,
                 },
             )
-            load_batch_id = result.scalar()
+            load_batch_id = lb_result.scalar()
     except Exception:
-        pass   # DB write failure does not abort the ingest response
+        pass  # DB write failure does not abort the ingest
+
+    # Run the pipeline — returns actual row counts
+    pipeline_stats = run_pipeline(root, filtered, load_batch_id=load_batch_id)
+    finished_at = datetime.utcnow()
+
+    inserted = pipeline_stats.get("inserted", 0)
+    raw_rows = pipeline_stats.get("raw_rows", 0)
+    error_rows = pipeline_stats.get("error_rows", 0)
+
+    # Update load_batch with final counts
+    if load_batch_id is not None:
+        try:
+            with get_session() as session:
+                session.execute(
+                    text("""
+                        UPDATE load_batch
+                        SET finished_at = :finished_at,
+                            inserted    = :inserted,
+                            rejected    = :rejected,
+                            rows_in     = :rows_in
+                        WHERE load_batch_id = :id
+                    """),
+                    {
+                        "finished_at": finished_at,
+                        "inserted": inserted,
+                        "rejected": error_rows,
+                        "rows_in": raw_rows,
+                        "id": load_batch_id,
+                    },
+                )
+        except Exception:
+            pass
 
     return {
-        "files_processed": files_processed,
+        "files_processed": pipeline_stats.get("files_processed", files_processed),
         "inserted": inserted,
+        "raw_rows": raw_rows,
+        "error_rows": error_rows,
         "load_batch_id": load_batch_id,
     }
 
 
 # ── Bounded context for /ask ──────────────────────────────────────────────────
+
 
 def build_bounded_context() -> str:
     """
@@ -330,12 +338,7 @@ def build_bounded_context() -> str:
 
     # Monthly revenue (last 12 months)
     df["ym"] = df["ds"].dt.to_period("M")
-    by_month = (
-        df.groupby("ym")["revenue"]
-        .sum()
-        .sort_index()
-        .tail(12)
-    )
+    by_month = df.groupby("ym")["revenue"].sum().sort_index().tail(12)
 
     # Month-over-month growth for category top-movers
     df_m = df.groupby(["ym", "category"])["revenue"].sum().reset_index()
@@ -363,12 +366,8 @@ def build_bounded_context() -> str:
     # Forecast summary from DB
     try:
         with get_session() as session:
-            fc_count = session.execute(
-                text("SELECT count(*) FROM forecast_results")
-            ).scalar()
-            fc_max = session.execute(
-                text("SELECT MAX(target_date) FROM forecast_results")
-            ).scalar()
+            fc_count = session.execute(text("SELECT count(*) FROM forecast_results")).scalar()
+            fc_max = session.execute(text("SELECT MAX(target_date) FROM forecast_results")).scalar()
         forecast_text = f"Forecast rows in DB: {fc_count} (latest target: {fc_max})"
     except Exception:
         forecast_text = "Forecast data unavailable"
@@ -398,6 +397,112 @@ def build_bounded_context() -> str:
     return "\n".join(lines)
 
 
+def get_product_performance(
+    start_date: date | None = None,
+    end_date: date | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Top products by revenue with brand + category enrichment."""
+    df = _load_sales()
+    if start_date:
+        df = df[df["ds"] >= pd.Timestamp(start_date)]
+    if end_date:
+        df = df[df["ds"] <= pd.Timestamp(end_date)]
+
+    products_path = downstream_dir() / "dim_product.csv"
+    if products_path.exists():
+        prods = pd.read_csv(products_path)[["sku", "brand", "category"]].drop_duplicates("sku")
+    else:
+        prods = pd.DataFrame(columns=["sku", "brand", "category"])
+
+    by_sku = (
+        df.groupby("sku")
+        .agg(revenue=("revenue", "sum"), transactions=("revenue", "count"))
+        .reset_index()
+    )
+    if not prods.empty:
+        by_sku = by_sku.merge(prods, on="sku", how="left")
+    else:
+        by_sku["brand"] = None
+        by_sku["category"] = None
+
+    by_sku = by_sku.sort_values("revenue", ascending=False).head(limit)
+
+    return [
+        {
+            "sku": str(row["sku"]),
+            "brand": str(row["brand"]) if pd.notna(row.get("brand")) else None,
+            "category": str(row["category"]) if pd.notna(row.get("category")) else None,
+            "revenue": round(float(row["revenue"]), 2),
+            "transactions": int(row["transactions"]),
+        }
+        for _, row in by_sku.iterrows()
+    ]
+
+
+def get_dq_report_files() -> list[dict[str, Any]]:
+    """Scan quality_reports/ and return metadata for every *_dq_report.csv."""
+    from datetime import datetime as _dt
+
+    qdir = quality_reports_dir()
+    if not qdir.exists():
+        return []
+
+    result: list[dict[str, Any]] = []
+    for fpath in sorted(qdir.glob("*_dq_report.csv"), reverse=True):
+        try:
+            df = pd.read_csv(fpath)
+            by_issue: dict[str, int] = {}
+            if "_dq_issue" in df.columns:
+                by_issue = {k: int(v) for k, v in df["_dq_issue"].value_counts().items()}
+
+            src_file = (
+                str(df["_dq_source_file"].iloc[0])
+                if "_dq_source_file" in df.columns and len(df) > 0
+                else None
+            )
+            sheet = (
+                str(df["_dq_sheet"].iloc[0]) if "_dq_sheet" in df.columns and len(df) > 0 else None
+            )
+
+            # Parse timestamp from filename prefix YYYYMMDD_HHMMSS_*
+            ts_str: str | None = None
+            try:
+                parts = fpath.stem.split("_")
+                if len(parts) >= 2 and len(parts[0]) == 8 and len(parts[1]) == 6:
+                    ts_str = _dt.strptime(parts[0] + parts[1], "%Y%m%d%H%M%S").strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+            except Exception:
+                pass
+
+            result.append(
+                {
+                    "filename": fpath.name,
+                    "total_rejected": len(df),
+                    "by_issue": by_issue,
+                    "source_file": src_file,
+                    "sheet": sheet,
+                    "report_ts": ts_str,
+                }
+            )
+        except Exception:
+            pass
+    return result
+
+
+def get_dq_report_detail(filename: str) -> list[dict[str, Any]]:
+    """Return rows from one DQ report CSV, guarding against path traversal."""
+    qdir = quality_reports_dir()
+    fpath = (qdir / filename).resolve()
+    if not str(fpath).startswith(str(qdir.resolve())):
+        raise ValueError("Invalid filename")
+    if not fpath.exists():
+        raise FileNotFoundError(f"DQ report not found: {filename}")
+    df = pd.read_csv(fpath)
+    return df.where(pd.notna(df), other=None).to_dict(orient="records")
+
+
 def get_insights_aggregates() -> dict[str, Any]:
     """Return the aggregates needed for /insights (separate from bounded context)."""
     df = _load_sales()
@@ -411,7 +516,5 @@ def get_insights_aggregates() -> dict[str, Any]:
         "by_category": [
             {"category": str(k), "revenue": round(float(v), 2)} for k, v in by_cat.items()
         ],
-        "by_region": [
-            {"region": str(k), "revenue": round(float(v), 2)} for k, v in by_reg.items()
-        ],
+        "by_region": [{"region": str(k), "revenue": round(float(v), 2)} for k, v in by_reg.items()],
     }

@@ -13,7 +13,7 @@ def _build_engine():
     settings = get_settings()
     return create_engine(
         settings.database_url,
-        pool_pre_ping=True,         # recycle stale connections after a DB restart
+        pool_pre_ping=True,  # recycle stale connections after a DB restart
         pool_size=5,
         max_overflow=10,
         echo=(settings.app_env == "development"),

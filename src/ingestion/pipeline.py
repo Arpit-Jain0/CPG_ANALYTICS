@@ -3,29 +3,37 @@ src/ingestion/pipeline.py
 
 Config-driven ingestion pipeline.
 
-Flow per file group:
-  1. Discover files via glob (dir + file_pattern from config)
-  2. Read each .xlsx with robust ghost-sheet + header-row detection
-  3. Clean the DataFrame (nulls, dates, numerics, whitespace)
-  4. Apply column map and inject static columns
-  5. Append or overwrite the target CSV in data/output/downstream/
+New 7-stage flow per sheet:
+  1. READ     excel_io.read_workbook()
+  2. ARCHIVE  copy original xlsx → data/archive/{YYYY-MM-DD}/
+  3. RAW      write unmodified rows to raw.* Postgres table (all TEXT)
+  4. CLEAN    clean_dataframe() — lowercase cols, null markers, date/numeric parsing
+  5. DQ       run_dq_checks()  — DUPLICATE_ROW | PK_DUPLICATE | DATATYPE_VIOLATION
+              └─ rejected rows → error.dq_rejected_rows (Postgres) + CSV report
+  6. MAP      apply_sheet_config() — column rename + static columns
+  7. WRITE    curated.* Postgres table  +  downstream CSV (for API / forecaster)
 
 Usage
 -----
-    python -m src.ingestion.pipeline [--root .] [--config config/ingestion.json]
+    python -m src.ingestion.pipeline                        # all groups
+    python -m src.ingestion.pipeline --mode historical      # reference + history only
+    python -m src.ingestion.pipeline --mode incremental     # incremental batches only
+    python -m src.ingestion.pipeline --root . --config config/ingestion.json
 """
+
 from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 from loguru import logger
 
 from src.common.config import get_settings
+from src.common.db import engine as _db_engine
 from src.common.excel_io import read_workbook
+from src.dq.checker import run_dq_checks
 from src.ingestion.config_loader import (
     FileGroup,
     IngestionConfig,
@@ -33,29 +41,25 @@ from src.ingestion.config_loader import (
     SheetConfig,
     load_config,
 )
-
+from src.ingestion.db_writer import (
+    archive_file,
+    write_curated,
+    write_error,
+    write_raw,
+)
 
 # ── Edge-case cleaning ────────────────────────────────────────────────────────
 
+
 def _try_parse_dates(series: pd.Series, formats: list[str]) -> pd.Series:
-    """
-    Attempt date parsing with each configured format string, then fall back to
-    pandas' own inference.  Returns original series if nothing succeeds.
-    """
     for fmt in formats:
         parsed = pd.to_datetime(series, format=fmt, errors="coerce")
         if parsed.notna().sum() >= series.notna().sum() * 0.5:
             return parsed
-    # Generic fallback — handles Python datetime / Timestamp objects too
     return pd.to_datetime(series, errors="coerce")
 
 
 def _try_numeric(series: pd.Series) -> pd.Series:
-    """
-    Strip common currency symbols and thousands separators, then try coercing
-    to numeric.  Only replaces the column if > 50 % of non-null values parse
-    successfully — keeps string IDs (TXN001, STORE001) untouched.
-    """
     stripped = series.astype(str).str.replace(r"[$,€£¥\s]", "", regex=True)
     numeric = pd.to_numeric(stripped, errors="coerce")
     if numeric.notna().sum() >= series.notna().sum() * 0.5:
@@ -64,71 +68,41 @@ def _try_numeric(series: pd.Series) -> pd.Series:
 
 
 _DATE_KEYWORDS = ("_date", "_ts", "_at", "_time", "datetime", "date", "timestamp")
-_ID_KEYWORDS   = ("_id", "_key", "order_id", "transaction_id", "campaign_id",
-                   "promo_id", "store_id", "location_id")
+_ID_KEYWORDS = (
+    "_id",
+    "_key",
+    "order_id",
+    "transaction_id",
+    "campaign_id",
+    "promo_id",
+    "store_id",
+    "location_id",
+)
 
 
 def clean_dataframe(df: pd.DataFrame, settings: PipelineSettings) -> pd.DataFrame:
-    """
-    Standard edge-case handling applied to every sheet before writing:
-
-    1. Normalise column names → lowercase + strip whitespace
-    2. Replace null markers (configurable) with pd.NA
-    3. Drop fully-empty rows
-    4. Strip leading/trailing whitespace from string values
-    5. Parse date-like columns (heuristic: column name contains date keyword)
-    6. Coerce numeric strings (currency symbols, commas) — skips ID columns
-    """
-    # 1. Column names
     df.columns = [str(c).strip().lower() for c in df.columns]
-
-    # 2. Null markers
     df = df.replace(settings.null_values, pd.NA)
-
-    # 3. Drop all-null rows
     df = df.dropna(how="all").reset_index(drop=True)
-
-    # 4. Strip string values
     for col in df.select_dtypes(include="object").columns:
         df[col] = df[col].apply(lambda x: x.strip() if isinstance(x, str) else x)
-
-    # 5. Date parsing
     for col in df.columns:
         if any(kw in col for kw in _DATE_KEYWORDS):
             df[col] = _try_parse_dates(df[col], settings.date_formats)
-
-    # 6. Numeric coercion (skip ID-like columns)
     for col in df.select_dtypes(include="object").columns:
         if not any(kw in col for kw in _ID_KEYWORDS):
             df[col] = _try_numeric(df[col])
-
     return df
 
 
 # ── Column mapping + enrichment ───────────────────────────────────────────────
+
 
 def apply_sheet_config(
     df: pd.DataFrame,
     sheet_cfg: SheetConfig,
     source_filename: str,
 ) -> pd.DataFrame:
-    """
-    Apply the sheet config's column_map, add_columns, and optional dedup.
-
-    column_map
-        When provided, only the listed source columns are kept and renamed.
-        Unrecognised source columns are dropped without error.
-        When absent, all columns pass through unchanged.
-
-    add_columns
-        Injects static columns; a value of null in the JSON means "use the
-        source filename" at runtime.
-
-    dedup_column
-        In-batch deduplication on the named column (cross-run dedup is the
-        downstream system's responsibility).
-    """
-    # Column map — lowercase the map keys to match post-clean column names
     if sheet_cfg.column_map:
         cmap = {k.lower(): v for k, v in sheet_cfg.column_map.items()}
         matched = {c: cmap[c] for c in df.columns if c in cmap}
@@ -137,55 +111,40 @@ def apply_sheet_config(
             logger.warning("    column_map: source columns not found → {}", missing)
         df = df[list(matched.keys())].rename(columns=matched)
 
-    # Inject static / derived columns
     for col, val in sheet_cfg.add_columns.items():
         df[col] = source_filename if val is None else val
 
-    # In-batch dedup
     if sheet_cfg.dedup_column and sheet_cfg.dedup_column in df.columns:
         before = len(df)
         df = df.drop_duplicates(subset=[sheet_cfg.dedup_column])
         dropped = before - len(df)
         if dropped:
-            logger.info("    dedup on '{}': removed {} duplicate(s)", sheet_cfg.dedup_column, dropped)
+            logger.info(
+                "    dedup on '{}': removed {} duplicate(s)", sheet_cfg.dedup_column, dropped
+            )
 
     return df
 
 
 # ── CSV writer ────────────────────────────────────────────────────────────────
 
+
 def write_csv(df: pd.DataFrame, dest: Path, write_mode: str) -> None:
-    """
-    Write *df* to *dest*.
-
-    overwrite
-        Truncates the file and writes a fresh copy with headers.
-    append
-        Appends rows without header.  If the file already exists, aligns the
-        incoming DataFrame to the existing columns (extra columns are dropped,
-        missing columns are filled with empty string) so the CSV stays
-        well-formed even when source schemas differ (e.g. POS vs ONLINE).
-    """
     dest.parent.mkdir(parents=True, exist_ok=True)
-
     if write_mode == "overwrite" or not dest.exists():
         df.to_csv(dest, index=False, encoding="utf-8")
-        logger.info("    → wrote {} rows to {} (overwrite)", len(df), dest.name)
+        logger.info("    CSV  {} rows → {} (overwrite)", len(df), dest.name)
     else:
-        # Align to existing schema so the CSV stays rectangular
         existing_cols = pd.read_csv(dest, nrows=0).columns.tolist()
         df = df.reindex(columns=existing_cols, fill_value="")
         df.to_csv(dest, mode="a", header=False, index=False, encoding="utf-8")
-        logger.info("    → appended {} rows to {} (append)", len(df), dest.name)
+        logger.info("    CSV  {} rows → {} (append)", len(df), dest.name)
 
 
 # ── Per-file processing ───────────────────────────────────────────────────────
 
-def _match_sheet_config(
-    sheet_name: str, group: FileGroup
-) -> SheetConfig | None:
-    """Return the first enabled SheetConfig that matches sheet_name (case-insensitive).
-    A sheet config with sheet='*' acts as a catch-all."""
+
+def _match_sheet_config(sheet_name: str, group: FileGroup) -> SheetConfig | None:
     for sc in group.sheets:
         if not sc.enabled:
             continue
@@ -198,19 +157,42 @@ def process_file(
     fpath: Path,
     group: FileGroup,
     downstream_dir: Path,
+    quality_dir: Path,
+    archive_dir: Path,
     settings: PipelineSettings,
-) -> None:
+    load_batch_id: int | None = None,
+) -> dict[str, int]:
+    """
+    Run the 7-stage pipeline for every matching sheet in *fpath*.
+
+    Returns a summary dict: {inserted, raw_rows, error_rows}.
+    """
+    summary = {"inserted": 0, "raw_rows": 0, "error_rows": 0}
     logger.info("[{}] {}", group.name, fpath.name)
 
+    # ── Stage 2: Archive original xlsx ───────────────────────────────────────
+    try:
+        archive_file(fpath, archive_dir)
+    except Exception as exc:
+        logger.warning("  Archive failed for {}: {}", fpath.name, exc)
+
+    # ── Stage 1: Read ────────────────────────────────────────────────────────
     try:
         sheets_data = read_workbook(fpath)
     except Exception as exc:
         logger.error("  Failed to open {}: {}", fpath.name, exc)
-        return
+        return summary
 
     if not sheets_data:
         logger.warning("  No readable sheets in {} — skipping", fpath.name)
-        return
+        return summary
+
+    # Use the module-level engine; ping to confirm DB is reachable
+    from src.common.db import ping as _ping
+
+    engine = _db_engine if _ping() else None
+    if engine is None:
+        logger.warning("  DB unreachable — raw/curated/error writes skipped; CSV write continues")
 
     for sheet_name, df_raw in sheets_data.items():
         sheet_cfg = _match_sheet_config(sheet_name, group)
@@ -224,28 +206,118 @@ def process_file(
 
         logger.info("  Sheet '{}': {} raw rows", sheet_name, len(df_raw))
 
-        # Clean → map → write
+        # ── Stage 3: RAW — write to raw.* before any transformation ─────────
+        if engine and sheet_cfg.raw_table:
+            # Normalise column names only (lowercase + strip) — no type coercion
+            df_for_raw = df_raw.copy()
+            df_for_raw.columns = [str(c).strip().lower() for c in df_for_raw.columns]
+            n_raw = write_raw(
+                df=df_for_raw,
+                raw_table=sheet_cfg.raw_table,
+                source_file=fpath.name,
+                sheet_name=sheet_name,
+                load_batch_id=load_batch_id,
+                engine=engine,
+            )
+            summary["raw_rows"] += n_raw
+
+        # ── Stage 4: Clean ───────────────────────────────────────────────────
         df = clean_dataframe(df_raw.copy(), settings)
+
+        # ── Stage 5: DQ ─────────────────────────────────────────────────────
+        df, rejected, dq_counts = run_dq_checks(
+            df=df,
+            pk_column=sheet_cfg.pk_column,
+            datatype_rules=sheet_cfg.datatype_rules,
+            source_file=fpath.name,
+            sheet_name=sheet_name,
+            quality_dir=quality_dir,
+        )
+        if dq_counts:
+            logger.info("  Sheet '{}' DQ summary: {}", sheet_name, dq_counts)
+
+        # Write rejected rows to error.dq_rejected_rows
+        if engine and not rejected.empty:
+            n_err = write_error(
+                rejected=rejected,
+                source_file=fpath.name,
+                sheet_name=sheet_name,
+                load_batch_id=load_batch_id,
+                engine=engine,
+            )
+            summary["error_rows"] += n_err
+
+        if df.empty:
+            logger.warning("  Sheet '{}' empty after DQ checks — skipped", sheet_name)
+            continue
+
+        # ── Stage 6: Map ─────────────────────────────────────────────────────
         df = apply_sheet_config(df, sheet_cfg, fpath.name)
 
         if df.empty:
-            logger.warning("  Sheet '{}' empty after cleaning — skipped", sheet_name)
+            logger.warning("  Sheet '{}' empty after column mapping — skipped", sheet_name)
             continue
+
+        # ── Stage 7: Write — curated Postgres + downstream CSV ───────────────
+        if engine and sheet_cfg.curated_table:
+            # Resolve pk_column in post-map column names
+            # (column_map may have renamed it; try mapped name first, then original)
+            curated_pk = None
+            if sheet_cfg.pk_column:
+                mapped_pk = sheet_cfg.column_map.get(sheet_cfg.pk_column, sheet_cfg.pk_column)
+                curated_pk = mapped_pk if mapped_pk in df.columns else sheet_cfg.pk_column
+
+            n_cur = write_curated(
+                df=df,
+                curated_table=sheet_cfg.curated_table,
+                write_mode=sheet_cfg.write_mode,
+                pk_column=curated_pk,
+                load_batch_id=load_batch_id,
+                engine=engine,
+            )
+            summary["inserted"] += n_cur
 
         target = downstream_dir / sheet_cfg.target_csv
         write_csv(df, target, sheet_cfg.write_mode)
 
+    return summary
+
 
 # ── Pipeline orchestrator ─────────────────────────────────────────────────────
 
-def run_pipeline(root: Path, config: IngestionConfig) -> None:
-    """Process all enabled file groups in declaration order."""
+
+def run_pipeline(
+    root: Path,
+    config: IngestionConfig,
+    mode: str = "all",
+    load_batch_id: int | None = None,
+) -> dict[str, int]:
+    """
+    Process all enabled file groups in declaration order.
+
+    mode
+        ``"all"``         — run every enabled group
+        ``"historical"``  — only groups whose dir path contains "historical"
+        ``"incremental"`` — only groups whose dir path contains "incremental"
+
+    Returns aggregate summary {inserted, raw_rows, error_rows, files_processed}.
+    """
     downstream_dir = root / config.settings.downstream_dir
+    quality_dir = root / config.settings.quality_reports_dir
+    archive_dir = root / config.settings.archive_dir
     downstream_dir.mkdir(parents=True, exist_ok=True)
+    quality_dir.mkdir(parents=True, exist_ok=True)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    totals: dict[str, int] = {"inserted": 0, "raw_rows": 0, "error_rows": 0, "files_processed": 0}
 
     for group in config.file_groups:
         if not group.enabled:
             logger.info("Skipping disabled group: {}", group.name)
+            continue
+
+        if mode != "all" and mode not in group.dir.lower():
+            logger.debug("Skipping group '{}' — not in mode '{}'", group.name, mode)
             continue
 
         src_dir = root / group.dir
@@ -257,17 +329,40 @@ def run_pipeline(root: Path, config: IngestionConfig) -> None:
         if not files:
             logger.warning(
                 "No files matching '{}' in {} — skipping group '{}'",
-                group.file_pattern, src_dir, group.name,
+                group.file_pattern,
+                src_dir,
+                group.name,
             )
             continue
 
         for fpath in files:
-            process_file(fpath, group, downstream_dir, config.settings)
+            result = process_file(
+                fpath,
+                group,
+                downstream_dir,
+                quality_dir,
+                archive_dir,
+                config.settings,
+                load_batch_id,
+            )
+            totals["inserted"] += result["inserted"]
+            totals["raw_rows"] += result["raw_rows"]
+            totals["error_rows"] += result["error_rows"]
+            totals["files_processed"] += 1
 
-    logger.info("Pipeline complete. CSVs written to: {}", downstream_dir)
+    logger.info("Pipeline complete.")
+    logger.info("  Files processed : {}", totals["files_processed"])
+    logger.info("  Raw rows landed : {}", totals["raw_rows"])
+    logger.info("  Error rows      : {}", totals["error_rows"])
+    logger.info("  Curated inserted: {}", totals["inserted"])
+    logger.info("  CSVs            → {}", downstream_dir)
+    logger.info("  DQ reports      → {}", quality_dir)
+    logger.info("  Archive         → {}", archive_dir)
+    return totals
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
+
 
 def _cli() -> None:
     parser = argparse.ArgumentParser(
@@ -276,8 +371,9 @@ def _cli() -> None:
         epilog=(
             "Examples:\n"
             "  python -m src.ingestion.pipeline\n"
+            "  python -m src.ingestion.pipeline --mode historical\n"
+            "  python -m src.ingestion.pipeline --mode incremental\n"
             "  python -m src.ingestion.pipeline --config config/ingestion.json\n"
-            "  python -m src.ingestion.pipeline --root /data/project\n"
         ),
     )
     parser.add_argument("--root", default=".", help="Repo root (default: cwd)")
@@ -286,6 +382,16 @@ def _cli() -> None:
         default=None,
         metavar="PATH",
         help="Path to ingestion.json (default: <root>/config/ingestion.json or INGESTION_CONFIG env var)",
+    )
+    parser.add_argument(
+        "--mode",
+        default="all",
+        choices=["all", "historical", "incremental"],
+        help=(
+            "'all' runs every enabled file group (default); "
+            "'historical' runs only groups whose dir contains 'historical'; "
+            "'incremental' runs only groups whose dir contains 'incremental'"
+        ),
     )
     args = parser.parse_args()
     root = Path(args.root).resolve()
@@ -303,11 +409,13 @@ def _cli() -> None:
 
     config = load_config(cfg_path)
     logger.info(
-        "Config loaded from {} — {} file group(s)",
-        cfg_path.name, len(config.file_groups),
+        "Config loaded from {} — {} file group(s)  mode={}",
+        cfg_path.name,
+        len(config.file_groups),
+        args.mode,
     )
 
-    run_pipeline(root, config)
+    run_pipeline(root, config, mode=args.mode)
 
 
 if __name__ == "__main__":

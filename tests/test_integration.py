@@ -25,23 +25,21 @@ Scenarios
 - Historical → incremental → forecast API chain: CSV pipeline writes data,
   forecast rows are written to DB, /forecast returns them.
 """
+
 from __future__ import annotations
 
-import json
 from contextlib import ExitStack
-from datetime import date, datetime
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from datetime import date
+from unittest.mock import patch
 
-import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from tests.conftest import requires_db
 
-
 # ── Data quality log ──────────────────────────────────────────────────────────
+
 
 @requires_db
 def test_quality_log_counts(db_session):
@@ -52,13 +50,11 @@ def test_quality_log_counts(db_session):
     from src.api.queries import get_quality_summary
 
     # Insert a load_batch first (FK constraint)
-    result = db_session.execute(
-        text("""
+    result = db_session.execute(text("""
             INSERT INTO load_batch (load_type, source_file, started_at, finished_at, inserted)
             VALUES ('HISTORICAL', 'test.xlsx', now(), now(), 10)
             RETURNING load_batch_id
-        """)
-    )
+        """))
     batch_id = result.scalar()
 
     # Insert 3 quality log rows: 2 NULL_REQUIRED / REPAIRED, 1 TYPE_MISMATCH / REJECTED
@@ -97,12 +93,10 @@ def test_latest_batch_reflected(db_session):
     """
     from src.api.queries import get_quality_summary
 
-    db_session.execute(
-        text("""
+    db_session.execute(text("""
             INSERT INTO load_batch (load_type, source_file, rows_in, inserted, repaired, started_at, finished_at)
             VALUES ('INCREMENTAL', 'batch_01.xlsx', 50, 48, 2, now(), now())
-        """)
-    )
+        """))
     db_session.commit()
 
     summary = get_quality_summary()
@@ -115,6 +109,7 @@ def test_latest_batch_reflected(db_session):
 
 
 # ── SCD2 dim_product ──────────────────────────────────────────────────────────
+
 
 @requires_db
 def test_scd2_closes_old_row_and_creates_new(db_session):
@@ -157,7 +152,9 @@ def test_scd2_closes_old_row_and_creates_new(db_session):
     db_session.commit()
 
     rows = db_session.execute(
-        text("SELECT category, is_current, valid_to FROM dim_product WHERE sku = :sku ORDER BY valid_from"),
+        text(
+            "SELECT category, is_current, valid_to FROM dim_product WHERE sku = :sku ORDER BY valid_from"
+        ),
         {"sku": sku},
     ).fetchall()
 
@@ -166,16 +163,17 @@ def test_scd2_closes_old_row_and_creates_new(db_session):
     old_row = rows[0]
     new_row = rows[1]
 
-    assert old_row[0] == "Beverages"   # category
-    assert old_row[1] is False         # is_current
-    assert old_row[2] is not None      # valid_to set
+    assert old_row[0] == "Beverages"  # category
+    assert old_row[1] is False  # is_current
+    assert old_row[2] is not None  # valid_to set
 
-    assert new_row[0] == "Dairy"       # updated category
-    assert new_row[1] is True          # is_current
-    assert new_row[2] is None          # valid_to NULL = still current
+    assert new_row[0] == "Dairy"  # updated category
+    assert new_row[1] is True  # is_current
+    assert new_row[2] is None  # valid_to NULL = still current
 
 
 # ── Late-arriving flag ────────────────────────────────────────────────────────
+
 
 @requires_db
 def test_late_arriving_flag_stored(db_session):
@@ -183,29 +181,23 @@ def test_late_arriving_flag_stored(db_session):
     A sales_transaction inserted with is_late_arriving=True is returned from
     the DB with that flag intact.
     """
-    db_session.execute(
-        text("""
+    db_session.execute(text("""
             INSERT INTO dim_region (region) VALUES ('EAST')
             ON CONFLICT DO NOTHING
-        """)
-    )
-    db_session.execute(
-        text("""
+        """))
+    db_session.execute(text("""
             INSERT INTO dim_store (store_id, region, city, store_type)
             VALUES ('LATE_S01', 'EAST', 'TestCity', 'SUPERMARKET')
             ON CONFLICT DO NOTHING
-        """)
-    )
-    db_session.execute(
-        text("""
+        """))
+    db_session.execute(text("""
             INSERT INTO sales_transactions
                 (transaction_id, transaction_ts, store_id, sku, quantity,
                  unit_price, revenue, currency, source_system, is_late_arriving)
             VALUES
                 ('LATE_T001', '2022-01-15 10:00:00', 'LATE_S01', 'SKU_LATE',
                  1, 10.0, 10.0, 'USD', 'POS', TRUE)
-        """)
-    )
+        """))
     db_session.commit()
 
     row = db_session.execute(
@@ -217,6 +209,7 @@ def test_late_arriving_flag_stored(db_session):
 
 
 # ── Forecast results query ─────────────────────────────────────────────────────
+
 
 @requires_db
 def test_forecast_rows_query(db_session):
@@ -257,10 +250,10 @@ def test_forecast_rows_query(db_session):
     # Patch get_session to use the test db_session
     import sqlalchemy.orm as _orm
 
-    original_make = _orm.sessionmaker
-
     def _patched_make(**kw):
-        return _orm.sessionmaker(bind=db_session.bind, **{k: v for k, v in kw.items() if k != "bind"})
+        return _orm.sessionmaker(
+            bind=db_session.bind, **{k: v for k, v in kw.items() if k != "bind"}
+        )
 
     with patch.object(db_module, "SessionLocal", db_session.__class__(bind=db_session.bind)):
         result = get_forecast_rows(category="Beverages", region="NORTHEAST", horizon=10)
@@ -272,6 +265,7 @@ def test_forecast_rows_query(db_session):
 
 
 # ── Full pipeline chain (CSV → forecast → API) ────────────────────────────────
+
 
 @requires_db
 def test_pipeline_to_forecast_api(tmp_path, db_session):

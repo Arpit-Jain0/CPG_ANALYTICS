@@ -1,4 +1,5 @@
 """Page 3 — AI Insights & Q&A: narrative summary + free-text question answering."""
+
 import sys
 from pathlib import Path
 
@@ -14,9 +15,9 @@ import api_client
 
 st.title("🤖 AI Insights & Q&A")
 st.caption(
-    "Aggregated revenue figures are sent to DeepSeek for narrative generation. "
+    "Aggregated revenue figures are sent to the local Ollama model for narrative generation. "
     "No raw transaction rows ever leave the system. "
-    "Works without an API key — a deterministic fallback fires instead."
+    "If Ollama is unreachable a deterministic fallback fires instead."
 )
 
 # ── Section 1: Revenue Insights ───────────────────────────────────────────────
@@ -33,14 +34,20 @@ if st.button("✨ Generate Summary", type="primary"):
             result = api_client.post_insights()
         st.session_state["insights"] = result
     except requests.exceptions.ConnectionError:
-        st.error("Cannot reach the API. Is the server running?")
+        st.error(
+            "❌ Cannot reach the API. Is the server running?  `uvicorn src.api.main:app --port 8000`"
+        )
+    except requests.exceptions.Timeout:
+        st.error("❌ Request timed out — the AI may be slow to respond. Try again.")
     except requests.exceptions.HTTPError as e:
-        st.error(f"API error {e.response.status_code}: {e.response.text[:300]}")
+        st.error(f"❌ API error {e.response.status_code}: {e.response.text[:300]}")
+    except Exception as e:
+        st.error(f"❌ {type(e).__name__}: {e}")
 
 if "insights" in st.session_state:
     ins = st.session_state["insights"]
 
-    llm_badge = "🟢 LLM" if ins["llm_used"] else "🟡 Fallback (no API key)"
+    llm_badge = "🟢 Ollama" if ins["llm_used"] else "🟡 Fallback (Ollama unreachable)"
     st.markdown(f"*Source: {llm_badge}*")
 
     st.info(ins["summary"])
@@ -108,14 +115,18 @@ if ask_btn and question.strip():
             result = api_client.post_ask(question.strip())
         st.session_state["ask_result"] = result
     except requests.exceptions.ConnectionError:
-        st.error("Cannot reach the API.")
+        st.error("❌ Cannot reach the API. Is the server running?")
+    except requests.exceptions.Timeout:
+        st.error("❌ Request timed out — the AI may be slow to respond. Try again.")
     except requests.exceptions.HTTPError as e:
-        st.error(f"API error {e.response.status_code}: {e.response.text[:300]}")
+        st.error(f"❌ API error {e.response.status_code}: {e.response.text[:300]}")
+    except Exception as e:
+        st.error(f"❌ {type(e).__name__}: {e}")
 
 if "ask_result" in st.session_state:
     res = st.session_state["ask_result"]
 
-    llm_badge = "🟢 LLM" if res["llm_used"] else "🟡 Fallback (no API key)"
+    llm_badge = "🟢 Ollama" if res["llm_used"] else "🟡 Fallback (Ollama unreachable)"
     st.markdown(f"**Question:** *{res['question']}*")
     st.markdown(f"*Source: {llm_badge}*")
 

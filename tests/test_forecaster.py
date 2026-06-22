@@ -11,9 +11,8 @@ Scenarios
 - fit_and_forecast: a synthetic seasonal series yields a non-empty, finite
   forecast with the expected columns and a positive yhat.
 """
-from __future__ import annotations
 
-from datetime import timedelta
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
@@ -21,14 +20,14 @@ import pytest
 
 prophet = pytest.importorskip("prophet", reason="Prophet not installed")
 
-from src.forecasting.forecaster import (
+from src.forecasting.forecaster import (  # noqa: E402
     build_daily_series,
     build_holidays,
     fit_and_forecast,
 )
 
-
 # ── build_daily_series ────────────────────────────────────────────────────────
+
 
 def test_build_daily_series_joins_correctly():
     """Sales joined with dim_product and dim_store produces a daily series with category/region."""
@@ -61,7 +60,7 @@ def test_build_daily_series_derives_online_revenue():
             "transaction_ts": ["2024-01-01 10:00:00", "2024-01-01 11:00:00"],
             "store_id": ["S01", "S01"],
             "sku": ["SKU01", "SKU01"],
-            "revenue": [None, 50.0],   # first row has no revenue (ONLINE)
+            "revenue": [None, 50.0],  # first row has no revenue (ONLINE)
             "unit_price": [25.0, 50.0],
             "quantity": [4, 1],
         }
@@ -99,13 +98,14 @@ def test_build_daily_series_drops_unmatched():
 
 # ── build_holidays ─────────────────────────────────────────────────────────────
 
+
 def test_build_holidays_filters_holiday_days():
     """Only rows with is_holiday=True appear in the holidays output."""
     cal = pd.DataFrame(
         {
             "calendar_date": ["2024-01-01", "2024-01-02", "2024-07-04"],
-            "is_holiday":    [True, False, True],
-            "holiday_name":  ["New Year", None, "Independence Day"],
+            "is_holiday": [True, False, True],
+            "holiday_name": ["New Year", None, "Independence Day"],
         }
     )
     holidays = build_holidays(cal)
@@ -133,6 +133,7 @@ def test_build_holidays_empty_calendar():
 
 # ── fit_and_forecast ──────────────────────────────────────────────────────────
 
+
 def _make_train_df(n_days: int = 70) -> pd.DataFrame:
     """
     Synthetic daily revenue: a trend + weekly seasonality + small noise.
@@ -141,10 +142,10 @@ def _make_train_df(n_days: int = 70) -> pd.DataFrame:
     dates = pd.date_range("2024-01-01", periods=n_days, freq="D")
     rng = np.random.default_rng(42)
     y = (
-        100.0                                         # base
-        + np.arange(n_days) * 0.5                    # slight upward trend
+        100.0  # base
+        + np.arange(n_days) * 0.5  # slight upward trend
         + 20.0 * np.sin(2 * np.pi * np.arange(n_days) / 7)  # weekly seasonality
-        + rng.normal(0, 5, n_days)                   # noise
+        + rng.normal(0, 5, n_days)  # noise
     )
     y = np.clip(y, 0, None)
     return pd.DataFrame({"ds": dates, "y": y})

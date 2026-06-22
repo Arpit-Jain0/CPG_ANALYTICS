@@ -14,7 +14,7 @@ def ingest(
     mode: str = Query(
         default="incremental",
         description="'historical' runs all reference + history groups; "
-                    "'incremental' runs the incremental batch group.",
+        "'incremental' runs the incremental batch group.",
     )
 ) -> IngestResponse:
     """
@@ -42,7 +42,9 @@ def ingest(
     batch = BatchStats(
         load_batch_id=stats.get("load_batch_id"),
         load_type=mode.upper(),
-        inserted=stats["inserted"],
+        rows_in=stats.get("raw_rows", 0),
+        inserted=stats.get("inserted", 0),
+        rejected=stats.get("error_rows", 0),
     )
 
     return IngestResponse(

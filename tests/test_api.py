@@ -16,12 +16,13 @@ POST /ingest        — trigger ingestion pipeline
 POST /insights      — aggregate insights (LLM-fallback and LLM paths)
 POST /ask           — natural-language Q&A (LLM-fallback and LLM paths)
 """
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
-
 # ── /health ───────────────────────────────────────────────────────────────────
+
 
 def test_health_ok(api_client):
     resp = api_client.get("/health")
@@ -34,9 +35,11 @@ def test_health_ok(api_client):
 
 def test_health_degraded():
     """When ping() returns False the status is 'degraded'."""
-    from src.api.main import app
     from contextlib import ExitStack
+
     from fastapi.testclient import TestClient
+
+    from src.api.main import app
 
     patches = [
         patch("src.api.main.ping", return_value=False),
@@ -55,6 +58,7 @@ def test_health_degraded():
 
 
 # ── /summary ──────────────────────────────────────────────────────────────────
+
 
 def test_summary_shape(api_client):
     resp = api_client.get("/summary")
@@ -88,6 +92,7 @@ def test_summary_category_list_structure(api_client):
 
 # ── /quality ──────────────────────────────────────────────────────────────────
 
+
 def test_quality_shape(api_client):
     resp = api_client.get("/quality")
     assert resp.status_code == 200
@@ -116,6 +121,7 @@ def test_quality_issue_list(api_client):
 
 # ── /forecast ─────────────────────────────────────────────────────────────────
 
+
 def test_forecast_shape(api_client):
     resp = api_client.get("/forecast")
     assert resp.status_code == 200
@@ -137,7 +143,9 @@ def test_forecast_point_fields(api_client):
 def test_forecast_404_when_no_data():
     """When the DB returns no forecast rows the endpoint returns 404."""
     from contextlib import ExitStack
+
     from fastapi.testclient import TestClient
+
     from src.api.main import app
 
     empty = {"run_date": None, "model_version": None, "points": []}
@@ -155,6 +163,7 @@ def test_forecast_404_when_no_data():
 
 
 # ── /ingest ───────────────────────────────────────────────────────────────────
+
 
 def test_ingest_historical(api_client):
     resp = api_client.post("/ingest?mode=historical")
@@ -179,6 +188,7 @@ def test_ingest_invalid_mode(api_client):
 
 # ── /insights (fallback path) ──────────────────────────────────────────────────
 
+
 def test_insights_shape(api_client):
     resp = api_client.post("/insights")
     assert resp.status_code == 200
@@ -198,7 +208,9 @@ def test_insights_fallback_llm_flag(api_client):
 def test_insights_llm_path():
     """When generate_insights returns llm_used=True the flag propagates."""
     from contextlib import ExitStack
+
     from fastapi.testclient import TestClient
+
     from src.api.main import app
 
     mock_agg = {
@@ -229,7 +241,9 @@ def test_insights_llm_path():
 def test_insights_503_when_data_missing():
     """FileNotFoundError from aggregation → 503."""
     from contextlib import ExitStack
+
     from fastapi.testclient import TestClient
+
     from src.api.main import app
 
     patches = [
@@ -249,6 +263,7 @@ def test_insights_503_when_data_missing():
 
 
 # ── /ask (fallback path) ───────────────────────────────────────────────────────
+
 
 def test_ask_shape(api_client):
     resp = api_client.post("/ask", json={"question": "Which region has the highest revenue?"})
@@ -274,7 +289,9 @@ def test_ask_fallback_llm_flag(api_client):
 def test_ask_llm_path():
     """When answer_question returns llm_used=True the flag propagates."""
     from contextlib import ExitStack
+
     from fastapi.testclient import TestClient
+
     from src.api.main import app
 
     patches = [
@@ -306,7 +323,9 @@ def test_ask_empty_question_rejected(api_client):
 def test_ask_503_when_data_missing():
     """FileNotFoundError from context build → 503."""
     from contextlib import ExitStack
+
     from fastapi.testclient import TestClient
+
     from src.api.main import app
 
     patches = [
@@ -327,10 +346,12 @@ def test_ask_503_when_data_missing():
 
 # ── LLM unit tests (llm.py, no HTTP call) ─────────────────────────────────────
 
+
 def test_llm_insights_fallback_deterministic():
     """generate_insights returns a deterministic string when Ollama is unreachable."""
     import asyncio
     from unittest.mock import patch as _patch
+
     from src.api.llm import generate_insights
 
     agg = {
@@ -354,6 +375,7 @@ def test_llm_ask_fallback_includes_context():
     """answer_question fallback embeds the bounded context in the reply."""
     import asyncio
     from unittest.mock import patch as _patch
+
     from src.api.llm import answer_question
 
     context = "Total revenue: $500"
@@ -371,6 +393,7 @@ def test_llm_insights_uses_llm_when_available():
     """generate_insights returns llm_used=True when _call_llm succeeds."""
     import asyncio
     from unittest.mock import patch as _patch
+
     from src.api.llm import generate_insights
 
     agg = {
@@ -389,12 +412,11 @@ def test_llm_insights_uses_llm_when_available():
 def test_llm_ask_uses_llm_when_available():
     import asyncio
     from unittest.mock import patch as _patch
+
     from src.api.llm import answer_question
 
     with _patch("src.api.llm._call_llm", return_value="Beverages leads revenue."):
-        answer, llm_used = asyncio.run(
-            answer_question("ctx", "top?")
-        )
+        answer, llm_used = asyncio.run(answer_question("ctx", "top?"))
 
     assert llm_used is True
     assert answer == "Beverages leads revenue."

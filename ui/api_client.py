@@ -5,13 +5,15 @@ Thin HTTP client that wraps every FastAPI endpoint.
 Read API_BASE_URL from the environment (default: http://localhost:8000).
 All errors are surfaced as exceptions so callers can wrap in st.error().
 """
+
 from __future__ import annotations
 
 import os
+
 import requests
 
-_BASE    = os.environ.get("API_BASE_URL", "http://localhost:8000").rstrip("/")
-_TIMEOUT = 120   # seconds — historical ingest can be slow
+_BASE = os.environ.get("API_BASE_URL", "http://localhost:8000").rstrip("/")
+_TIMEOUT = 120  # seconds — historical ingest can be slow
 
 
 def _get(path: str, **params) -> dict:
@@ -62,3 +64,44 @@ def post_ask(question: str) -> dict:
 
 def post_ingest(mode: str) -> dict:
     return _post("/ingest", mode=mode)
+
+
+def get_products(
+    start_date=None,
+    end_date=None,
+    limit: int = 20,
+) -> dict:
+    return _get(
+        "/products",
+        start_date=str(start_date) if start_date else None,
+        end_date=str(end_date) if end_date else None,
+        limit=limit,
+    )
+
+
+def get_dq_reports() -> dict:
+    return _get("/dq-reports")
+
+
+def get_dq_report_detail(filename: str) -> dict:
+    return _get(f"/dq-reports/{filename}")
+
+
+def post_generate_batch(batch_type: str) -> dict:
+    """Generate a weekly incremental batch file via the API."""
+    return _post("/generate-batch", type=batch_type)
+
+
+def get_db_overview() -> dict:
+    """Return all schemas with table names and row counts."""
+    return _get("/db/overview")
+
+
+def get_db_table_data(
+    schema: str,
+    table: str,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    """Fetch paginated rows from schema.table."""
+    return _get("/db/table", schema=schema, table=table, limit=limit, offset=offset)

@@ -1,173 +1,290 @@
 # CPG Analytics Platform
 
-End-to-end analytics platform for CPG sales data: raw Excel → cleaned CSVs → Prophet forecasts → FastAPI → Streamlit dashboard with AI Q&A.
+End-to-end analytics platform: Excel → 7-stage ingestion pipeline → Prophet revenue forecasts → FastAPI → Streamlit dashboard with LLM Q&A.
 
 ---
 
-## Tech Stack
+## Stack
 
-| Layer | Technology |
+| Layer | Tech |
 |---|---|
 | Language | Python 3.11 |
-| Data wrangling | pandas 2.x + openpyxl 3.x |
-| Config | JSON (`config/ingestion.json`) |
-| Settings / env | pydantic-settings 2.x |
-| Logging | loguru |
-| Database | PostgreSQL 16 (Docker) |
+| Ingestion | pandas 2.x, openpyxl 3.x |
+| Database | PostgreSQL 16 |
 | ORM | SQLAlchemy 2.x |
-| Forecasting | Prophet 1.x |
+| Forecasting | Facebook Prophet 1.x |
 | API | FastAPI 0.137+ |
-| UI | Streamlit 1.35+ |
-| LLM | DeepSeek chat completions (optional; fallback built-in) |
-| HTTP client | httpx (API→LLM), requests (UI→API) |
-| Charts | Altair 5.x |
-| Containerisation | Docker + docker-compose |
+| UI | Streamlit 1.35+, Altair 5.x |
+| LLM | Ollama (local Docker container; fallback built-in) |
+| Containers | Docker + Docker Compose |
+| CI | GitHub Actions |
 
 ---
 
-## Repository Layout
+## Directory Layout
 
 ```
-cpg-analytics/
+CPG_analytics/
 ├── config/
-│   └── ingestion.json          ← all file/sheet routing rules (no Python hardcoding)
+│   └── ingestion.json          ← file/sheet routing; no Python hardcoding
 ├── data/
 │   ├── input/
-│   │   ├── historical/         ← bulk Excel files (run once)
-│   │   └── incremental/        ← daily/weekly batch files
+│   │   ├── historical/         ← bulk Excel files (run generate_data.py once)
+│   │   └── incremental/        ← weekly batch files
 │   └── output/
-│       └── downstream/         ← 9 output CSVs written by the pipeline
+│       ├── downstream/         ← 9 CSVs written by pipeline; read by API + forecaster
+│       └── quality_reports/    ← per-sheet DQ violation reports
 ├── db/
-│   └── init/
-│       └── 01_schema.sql       ← Postgres DDL (auto-applied by Docker on first start)
+│   └── init/01_schema.sql      ← Postgres DDL; auto-applied by Docker on first start
 ├── scripts/
 │   └── generate_data.py        ← synthetic data generator (seed=42, deterministic)
 ├── src/
 │   ├── common/
-│   │   ├── config.py           ← Settings (all env vars via pydantic-settings)
-│   │   ├── db.py               ← SQLAlchemy engine + get_session() context manager
-│   │   └── excel_io.py         ← .xlsx reader: ghost-sheet skip + header auto-detect
+│   │   ├── config.py           ← Settings via pydantic-settings (reads .env)
+│   │   ├── db.py               ← SQLAlchemy engine + get_session()
+│   │   └── excel_io.py         ← xlsx reader: ghost-sheet skip, header auto-detect
+│   ├── dq/
+│   │   └── checker.py          ← 3 DQ checks per sheet before write
 │   ├── ingestion/
-│   │   ├── config_loader.py    ← loads ingestion.json → typed dataclasses
-│   │   └── pipeline.py         ← read → clean → write CSV (3-stage orchestration)
+│   │   ├── config_loader.py    ← parses ingestion.json → typed dataclasses
+│   │   ├── pipeline.py         ← 7-stage pipeline orchestrator
+│   │   └── db_writer.py        ← archive, write_raw, write_error, write_curated
 │   ├── forecasting/
-│   │   └── forecaster.py       ← Prophet fits per (category, region); writes to DB
+│   │   └── forecaster.py       ← Prophet per (category × region); writes forecast_results
 │   └── api/
 │       ├── main.py             ← FastAPI app + lifespan
-│       ├── models.py           ← all Pydantic response models
-│       ├── queries.py          ← data access: reads CSVs + queries DB
-│       ├── llm.py              ← DeepSeek client + deterministic fallback
-│       └── routes/
-│           ├── health.py       ← GET /health
-│           ├── ingest.py       ← POST /ingest
-│           ├── summary.py      ← GET /summary
-│           ├── quality.py      ← GET /quality
-│           ├── forecast.py     ← GET /forecast
-│           ├── insights.py     ← POST /insights
-│           └── ask.py          ← POST /ask
+│       ├── models.py           ← Pydantic response models
+│       ├── queries.py          ← CSV reads + DB queries; LLM context builder
+│       ├── llm.py              ← Ollama client + deterministic fallback
+│       └── routes/             ← one file per endpoint group (11 endpoints total)
 ├── ui/
 │   ├── app.py                  ← Streamlit entry point + st.navigation
-│   ├── api_client.py           ← thin requests wrapper (reads API_BASE_URL)
-│   └── pages/
-│       ├── dashboard.py        ← revenue KPIs + charts + quality panel
-│       ├── forecast.py         ← Prophet forecast chart with confidence band
-│       ├── insights.py         ← LLM narrative + free-text Q&A
-│       └── data_loads.py       ← trigger ingest + view audit results
-├── Dockerfile.api              ← API container (python:3.11-slim)
-├── Dockerfile.ui               ← UI container (python:3.11-slim)
-├── docker-compose.yml          ← postgres + api + ui (all start with `docker compose up`)
-├── .env.example                ← all env vars with defaults
-└── pyproject.toml
+│   ├── api_client.py           ← requests wrapper, one function per endpoint
+│   └── pages/                  ← 8 pages (see UI section below)
+├── tests/                      ← 64 tests across 5 files
+├── .github/workflows/ci.yml    ← lint + test + Docker build on every push
+├── Dockerfile.api
+├── Dockerfile.ui
+├── docker-compose.yml          ← 5 services: postgres, ollama, ollama-init, api, ui
+├── pyproject.toml
+└── .env.example
 ```
 
 ---
 
-## End-to-End Data Flow
+## Data Flow
 
 ```
 scripts/generate_data.py
         │
         ▼
-data/input/historical/*.xlsx          data/input/incremental/*.xlsx
-        │                                       │
-        └───────────────┬───────────────────────┘
-                        ▼
-              config/ingestion.json
-              (7 file groups: dir, pattern, sheet→csv routing)
-                        │
-                        ▼
-           src/ingestion/pipeline.py
-           Stage 1 — READ    excel_io.read_workbook()
-           Stage 2 — CLEAN   clean_dataframe()
-           Stage 3 — WRITE   write_csv()
-                        │
-                        ▼
-           data/output/downstream/   ← 9 CSVs
-           sales_transactions.csv    (~41k rows)
-           dim_product / dim_store / dim_region / seasonal_calendar
-           promo_windows / marketing_campaigns / competitor_prices
-           product_updates
-                        │
-                        ▼
-           src/forecasting/forecaster.py
-           • join CSVs → daily (category, region) revenue series
-           • Prophet fit per pair (weekly + yearly seasonality)
-           • promo_active regressor (discount_pct/100)
-           • holiday component from seasonal_calendar
-           • writes 20 pairs × 90 days = 1,800 rows to Postgres
-                        │
-                        ▼
-              [Postgres] forecast_results table
-              + load_batch / data_quality_log (written by /ingest)
-                        │
-                        ▼
-              src/api/main.py  (FastAPI)
-              7 endpoints — reads CSVs + DB; never raw rows to LLM
-                        │
-                        ▼
-              ui/app.py  (Streamlit)
-              4 pages — talks ONLY to FastAPI via API_BASE_URL
+data/input/historical/*.xlsx    data/input/incremental/*.xlsx
+        │                               │
+        └───────────┬───────────────────┘
+                    │
+          ┌─────────▼──────────┐
+          │  1. READ           │  excel_io.read_workbook()
+          ├─────────▼──────────┤
+          │  2. ARCHIVE        │  copy xlsx → data/archive/{date}/
+          ├─────────▼──────────┤
+          │  3. RAW            │  insert all rows as TEXT → raw.* (Postgres)
+          ├─────────▼──────────┤
+          │  4. CLEAN          │  null markers, date/numeric parsing
+          ├─────────▼──────────┤
+          │  5. DQ CHECK       │  3 checks; rejected → error.dq_rejected_rows + CSV
+          ├─────────▼──────────┤
+          │  6. MAP            │  column rename + static column injection
+          ├─────────▼──────────┤
+          │  7. WRITE          │  curated.* (Postgres) + data/output/downstream/*.csv
+          └────────────────────┘
+                    │
+       data/output/downstream/  ← 9 CSVs (sales_transactions, dim_product,
+                    │              dim_store, dim_region, seasonal_calendar,
+                    │              promo_windows, marketing_campaigns,
+                    │              competitor_prices, product_updates)
+                    │
+        ┌───────────▼───────────┐
+        │  forecaster.py        │  joins CSVs → daily (category, region) series
+        │  Prophet × 20 models  │  fits + predicts → writes forecast_results (DB)
+        └───────────▼───────────┘
+                    │
+        ┌───────────▼───────────┐
+        │  FastAPI (11 endpoints)│  reads downstream CSVs + Postgres
+        └───────────▼───────────┘
+                    │
+        ┌───────────▼───────────┐
+        │  Streamlit (8 pages)  │  talks only to FastAPI — never to DB directly
+        └───────────────────────┘
 ```
+
+**Postgres layers (database: `cpg_analytics`):**
+
+| Schema | Tables | Written by |
+|---|---|---|
+| `raw.*` | 10 tables — source TEXT, full row history | pipeline stage 3 |
+| `error.*` | `dq_rejected_rows` (JSONB row + issue detail) | pipeline stage 5 |
+| `curated.*` | 9 typed + indexed tables | pipeline stage 7 |
+| `public` | `load_batch`, `data_quality_log`, `forecast_results` | ingest API + forecaster |
 
 ---
 
-## Layer Details
+## Quick Start
 
-### 1. Data Generation (`scripts/generate_data.py`)
+### Option A — Docker (recommended)
 
-Creates all Excel input files. Run once before the pipeline.
+Ollama runs as a **Docker container**, not a host install. On first run it downloads the LLM model (~4.7 GB) into a named volume. Subsequent starts use the cached model.
 
 ```bash
-python3 scripts/generate_data.py
+git clone <repo-url>
+cd <repo-folder>
+cp .env.example .env
+
+docker compose up --build
+# First run: 5–15 min (Ollama model download). API uses deterministic fallback while downloading.
 ```
 
-Generates:
-- `historical_data.xlsx` — 4 sheets: dim_region, dim_store, dim_product, seasonal_calendar
-- `pos_sales_history.xlsx` / `online_sales_history.xlsx` — ~24 months of transactions
-- `promo_windows.xlsx`, `marketing_campaigns.xlsx`, `competitor_prices.xlsx`
-- 3 incremental batch files in `data/input/incremental/`
+Once healthy, run the one-time data setup:
 
-Revenue signal: `demand = base × trend × weekly_factor × Q4_lift × promo_factor × noise`. Online rows have no `amount` column — revenue is derived as `unit_price × quantity` at aggregation time.
+```bash
+# 1. Generate synthetic Excel input files (writes to ./data/input/ on the host)
+python3 scripts/generate_data.py
+
+# 2. Ingest historical data (all reference dims + 2 years of transactions)
+docker compose exec api python3 -m src.ingestion.pipeline --mode historical
+
+# 3. Ingest the 3 pre-seeded incremental batches
+docker compose exec api python3 -m src.ingestion.pipeline --mode incremental
+
+# 4. Train Prophet models and write 90-day forecasts to DB
+docker compose exec api python3 -m src.forecasting.forecaster
+```
+
+> `generate_data.py` writes files to `./data/input/` on the host. The `./data` folder is bind-mounted into the api container, so the pipeline sees the same files when run via `docker compose exec`.
+
+| Service | URL |
+|---|---|
+| Streamlit UI | http://localhost:8501 |
+| FastAPI + Swagger | http://localhost:8000/docs |
+| Postgres | localhost:5432 |
+| Ollama | http://localhost:11434 |
 
 ---
 
-### 2. Ingestion Pipeline (`src/ingestion/`)
+### Option B — Local dev (Python + Docker for Postgres only)
 
-**`config/ingestion.json`** — the only place that knows file names, sheet names, column maps. No hardcoding in Python.
+Prerequisites: Python 3.11+, Docker Desktop
 
-**`config_loader.py`** — parses the JSON into typed dataclasses (`IngestionConfig`, `FileGroup`, `SheetConfig`). Uses stdlib `json` only.
+```bash
+git clone <repo-url>
+cd <repo-folder>
+cp .env.example .env
+pip install -e ".[dev]"
 
-**`pipeline.py`** — three stages per sheet:
+# Postgres only in Docker
+docker compose up postgres -d
 
-| Stage | Function | What it does |
+# Generate data
+python3 scripts/generate_data.py
+
+# Ingest
+python3 -m src.ingestion.pipeline --mode historical
+python3 -m src.ingestion.pipeline --mode incremental
+
+# Forecast
+python3 -m src.forecasting.forecaster
+
+# API — keep running in a separate terminal
+uvicorn src.api.main:app --reload --port 8000
+
+# UI — keep running in a separate terminal
+streamlit run ui/app.py
+```
+
+---
+
+## Data Generation
+
+`scripts/generate_data.py` creates all Excel input files. Run once before ingestion.
+
+```bash
+python3 scripts/generate_data.py          # default seed=42
+python3 scripts/generate_data.py --seed 7  # different seed
+```
+
+Files created:
+
+| File | Location | Contents |
 |---|---|---|
-| READ | `excel_io.read_workbook()` | Opens xlsx, skips ghost sheets, auto-detects header row |
-| CLEAN | `clean_dataframe()` | Lowercase cols, null markers, date parsing, numeric coercion (ID cols protected) |
-| WRITE | `write_csv()` | Overwrite or append; append aligns schema so POS+ONLINE rows merge cleanly |
+| `historical_data.xlsx` | `data/input/historical/` | 4 sheets: dim_product, dim_region, dim_store, seasonal_calendar |
+| `pos_sales_history.xlsx` | `data/input/historical/` | ~30K POS transactions, 2 years, Schema A |
+| `online_sales_history.xlsx` | `data/input/historical/` | ~13K online orders, 2 years, Schema B (no amount column) |
+| `promo_windows.xlsx` | `data/input/historical/` | 8 promotion periods |
+| `marketing_campaigns.xlsx` | `data/input/historical/` | 6 marketing campaigns |
+| `competitor_prices.xlsx` | `data/input/historical/` | Monthly competitor prices |
+| `2024-07-01_pos.xlsx` | `data/input/incremental/` | Week 1 POS batch (with title row + ghost sheet + duplicate IDs) |
+| `2024-07-08_online.xlsx` | `data/input/incremental/` | Week 2 online batch (with SCD2 change sheet + duplicate IDs) |
+| `2024-07-15_pos.xlsx` | `data/input/incremental/` | Week 3 POS batch |
 
-The 7 file groups and their outputs:
+**Schema A** (POS): `transaction_id / ts / store_id / sku / qty / unit_price / amount / currency`
+**Schema B** (Online): `order_id / order_datetime / location_id / product_sku / units / price_per_unit / currency` — no amount column; revenue derived as `unit_price × quantity` at pipeline time.
 
-| Group | Reads from | Writes to | Mode |
+Each file has ~8.8% intentional DQ issues (null unit prices, mixed date formats, zero/negative quantities, unknown store/SKU IDs) to exercise the DQ checker.
+
+**Live weekly batches** (for ongoing use):
+
+```bash
+# Generate this week's POS batch (idempotent — skips if already created this week)
+curl -X POST "http://localhost:8000/generate-batch?type=pos"
+
+# Generate this week's online batch
+curl -X POST "http://localhost:8000/generate-batch?type=online"
+
+# Then ingest
+curl -X POST "http://localhost:8000/ingest?mode=incremental"
+```
+
+Or use the **🔄 Data Loads** page in the UI.
+
+---
+
+## Ingestion Pipeline
+
+`config/ingestion.json` controls everything. No Python changes to add a new source.
+
+**7 stages per sheet:**
+
+| Stage | What happens |
+|---|---|
+| READ | Opens xlsx; skips ghost sheets; auto-detects header row (sparse first row = title row) |
+| ARCHIVE | Copies original xlsx to `data/archive/{YYYY-MM-DD}/` |
+| RAW | Inserts every row as TEXT into `raw.*` — no cleaning, no filtering |
+| CLEAN | Lowercase cols; replace null markers; parse dates; coerce numerics; strip whitespace |
+| DQ | 3 checks; rejected rows → `error.dq_rejected_rows` + `data/output/quality_reports/` CSV |
+| MAP | Column rename + static field injection (e.g. `source_system=POS`) |
+| WRITE | Typed rows → `curated.*` (Postgres) + `data/output/downstream/*.csv` |
+
+**DQ checks:**
+
+| Check | Issue type | Action |
+|---|---|---|
+| Identical rows in same batch | `DUPLICATE_ROW` | Keep first, drop rest |
+| Same PK, different data | `PK_DUPLICATE` | Keep first, drop rest |
+| Numeric col holds text, or qty ≤ 0 | `DATATYPE_VIOLATION` | Drop row |
+
+**Commands:**
+
+```bash
+python3 -m src.ingestion.pipeline                    # all groups
+python3 -m src.ingestion.pipeline --mode historical  # reference dims + history
+python3 -m src.ingestion.pipeline --mode incremental # incremental group only
+
+curl -X POST "http://localhost:8000/ingest?mode=historical"
+curl -X POST "http://localhost:8000/ingest?mode=incremental"
+```
+
+**File groups and their outputs:**
+
+| Group | Source file | Output CSV | Write mode |
 |---|---|---|---|
 | reference_dimensions | `historical_data.xlsx` | 4 dim CSVs | overwrite |
 | promo_windows | `promo_windows.xlsx` | `promo_windows.csv` | overwrite |
@@ -177,169 +294,210 @@ The 7 file groups and their outputs:
 | online_history | `*online*.xlsx` | `sales_transactions.csv` | append |
 | incremental_batches | `data/input/incremental/*.xlsx` | `sales_transactions.csv` | append |
 
-```bash
-python3 -m src.ingestion.pipeline
-python3 -m src.ingestion.pipeline --config config/ingestion.json --root .
+---
+
+## Forecasting
+
+One Prophet model per `(category × region)` pair = **20 models**. Reads downstream CSVs, writes to `forecast_results` table.
+
+**Why Prophet:**
+
+| Requirement | Why it fits |
+|---|---|
+| Weekly + yearly seasonality | Decomposes both as separate components; CPG weekends and Q4 are strong signals |
+| Future external regressors | Accepts holiday and promo calendars for the full forecast horizon; ARIMA/ETS cannot |
+| Multiplicative demand | Promo lift scales with trend level, not as a flat offset |
+| Confidence intervals | Built-in 90% CI for inventory safety-stock planning |
+| Missing days | Handles gaps without imputation |
+
+Alternatives rejected: ARIMA (no future regressors), LSTM (needs far more data, harder to debug), ETS (no regressor support).
+
+**Key config:**
+
+```python
+Prophet(
+    seasonality_mode        = "multiplicative",
+    interval_width          = 0.90,           # 90% CI
+    changepoint_prior_scale = 0.05,           # moderate trend flexibility
+)
+m.add_regressor("promo_active", mode="multiplicative")  # discount_pct / 100
+# Holiday upper_window=1 captures post-holiday spend
 ```
+
+Pairs with fewer than 60 unique training dates are skipped.
+
+**Commands:**
+
+```bash
+python3 -m src.forecasting.forecaster                  # 90-day forecast, all 20 pairs
+python3 -m src.forecasting.forecaster --horizon 180    # extended horizon
+python3 -m src.forecasting.forecaster --min-history 90 # stricter history guard
+
+# Verify
+docker exec -it <postgres-container> psql -U cpg -d cpg_analytics \
+  -c "SELECT category, region, count(*) FROM forecast_results GROUP BY 1,2 ORDER BY 1,2;"
+```
+
+Re-run after every incremental ingest to incorporate the latest transactions.
+
+**Output table `forecast_results`:**
+
+| Column | Type | Notes |
+|---|---|---|
+| `run_date` | DATE | Forecast vintage |
+| `category` | TEXT | Product category |
+| `region` | TEXT | Sales region |
+| `target_date` | DATE | Predicted date |
+| `predicted_revenue` | NUMERIC(14,4) | Prophet `yhat` |
+| `yhat_lower` | NUMERIC(14,4) | Lower 90% CI |
+| `yhat_upper` | NUMERIC(14,4) | Upper 90% CI |
+| `model_version` | TEXT | `"prophet-v1"` |
+
+`UNIQUE (run_date, category, region, target_date)` + `ON CONFLICT DO UPDATE` — re-runs are idempotent.
 
 ---
 
-### 3. Forecasting (`src/forecasting/forecaster.py`)
+## API Endpoints
 
-Fits one Prophet model per `(category, region)` pair and writes predictions to Postgres.
-
-**What it does:**
-1. Reads the 5 downstream CSVs, joins them, aggregates to daily revenue per pair
-2. Builds a Prophet holiday DataFrame from `seasonal_calendar.csv`
-3. Builds a `promo_active` regressor (0–1 scale) from `promo_windows.csv`
-4. Fits Prophet with weekly + yearly seasonality in multiplicative mode
-5. Forecasts a configurable horizon (default 90 days)
-6. Deletes stale rows for `(run_date, category, region)` then inserts fresh predictions
-
-**Output table:** `forecast_results` — columns: `run_date`, `category`, `region`, `target_date`, `predicted_revenue`, `yhat_lower`, `yhat_upper`, `model_version`
-
-```bash
-python3 -m src.forecasting.forecaster
-python3 -m src.forecasting.forecaster --horizon 180 --min-history 60
-```
-
-Extension points (data ingested, not yet wired as regressors): `marketing_campaigns`, `competitor_prices`.
-
----
-
-### 4. API (`src/api/`)
-
-FastAPI service that the UI talks to exclusively. Reads from downstream CSVs and Postgres. Never sends raw rows to the LLM.
-
-**`main.py`** — creates the FastAPI app, wires all routers, checks DB on startup.
-
-**`models.py`** — Pydantic response models for every endpoint.
-
-**`queries.py`** — all data access in one place: CSV joins, DB queries, bounded context builder for `/ask`.
-
-**`llm.py`** — DeepSeek chat completions via `httpx`. Two prompts (`insights`, `ask`). Deterministic fallback for both when `DEEPSEEK_API_KEY` is blank.
-
-**Endpoints:**
-
-| Method | Path | What it returns |
+| Method | Path | Returns |
 |---|---|---|
 | GET | `/health` | `{status, db_connected, version}` |
-| POST | `/ingest?mode=historical\|incremental` | Runs pipeline; returns `load_batch` audit (inserted/deduped/rejected/…) |
-| GET | `/summary` | Total revenue, top category/region, breakdowns; optional `start_date`/`end_date` |
-| GET | `/quality` | Issue counts by type + action, latest load_batch from Postgres |
-| GET | `/forecast` | Precomputed Prophet rows filtered by `category`, `region`, `horizon` |
-| POST | `/insights` | Revenue aggregates sent to LLM → narrative summary (fallback if no key) |
-| POST | `/ask` | `{question}` → bounded context built from aggregates → LLM answer (fallback if no key) |
+| POST | `/ingest?mode=historical\|incremental` | Runs pipeline; returns load_batch audit |
+| POST | `/generate-batch?type=pos\|online` | Generates this week's incremental xlsx (idempotent) |
+| GET | `/summary` | Revenue KPIs, top category/region, breakdowns |
+| GET | `/quality` | DQ issue counts by type + action, latest load_batch |
+| GET | `/forecast` | Prophet rows filtered by category, region, horizon |
+| GET | `/products` | Top SKUs by revenue with brand + category |
+| GET | `/dq-reports` | List of DQ report CSV files with per-check counts |
+| GET | `/dq-reports/{filename}` | Rejected rows from one report |
+| POST | `/insights` | Revenue aggregates → LLM narrative (fallback if Ollama down) |
+| POST | `/ask` | Free-text Q&A — bounded context only; raw rows never sent to LLM |
 
 ```bash
-uvicorn src.api.main:app --reload --port 8000
+# Sample calls
+curl http://localhost:8000/health
+curl http://localhost:8000/summary
+curl "http://localhost:8000/forecast?category=Beverages&region=NORTHEAST&horizon=30"
+curl "http://localhost:8000/products?limit=10"
+curl http://localhost:8000/dq-reports
+curl -X POST http://localhost:8000/insights
+curl -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Which category has the highest revenue?"}'
 ```
+
+Swagger UI: `http://localhost:8000/docs`
 
 ---
 
-### 5. UI (`ui/`)
+## UI Pages
 
-Streamlit multipage app. Reads `API_BASE_URL` env var (default `http://localhost:8000`). **Never connects to the database directly.**
+All pages talk to the API only; no direct DB access.
 
-**`app.py`** — entry point; sets page config and wires the 4 pages via `st.navigation`.
-
-**`api_client.py`** — thin `requests` wrapper. One function per API endpoint.
-
-**Pages:**
-
-| Page | API calls | What the user sees |
-|---|---|---|
-| 📊 Dashboard | `/summary`, `/quality` | 4 KPI metrics, bar charts by category + region, data-reliability panel |
-| 📈 Forecast | `/summary`, `/forecast` | Category/region dropdowns, horizon slider, Altair band chart |
-| 🤖 AI Insights & Q&A | `/insights`, `/ask` | "Generate Summary" button, free-text question box, LLM/fallback badge |
-| 🔄 Data Loads | `/ingest`, `/quality` | Historical + Incremental buttons, colour-coded audit table, pipeline history |
+| Page | What it shows |
+|---|---|
+| 🏠 Home | Platform status, quick stats, navigation cards, recent DQ violations |
+| 📊 Dashboard | KPI tiles, revenue charts by category/region, product performance, DQ panel |
+| 📈 Forecast | Category + region dropdowns, horizon slider, Prophet confidence-band chart |
+| 🤖 AI Insights & Q&A | LLM narrative + free-text Q&A, LLM/fallback badge |
+| 🛡 DQ Reports | Report index, chart by issue type, row-level drill-down, CSV download |
+| 🔄 Data Loads | Historical + incremental load buttons, weekly batch generator, audit table |
+| 🗄️ Database Explorer | Browse Postgres tables and schema |
+| 🏗️ Architecture & Flow | System diagrams: combined, ingestion, forecasting, API+UI, Docker |
+| 🧪 Test Coverage | What's tested, what's not, how to run |
 
 ```bash
 streamlit run ui/app.py
+# Opens at http://localhost:8501
 ```
 
 ---
 
-## How to Run
-
-### Local (no Docker)
+## Tests
 
 ```bash
-# 1. Install
-cd cpg-analytics
-cp .env.example .env
-pip install -e ".[dev]"
+# Unit + API contract tests — no DB, no infra (~1.5 s)
+pytest tests/ -q
 
-# 2. Start Postgres
-docker compose up postgres -d
+# Include integration tests (needs Postgres)
+TEST_DATABASE_URL=postgresql+psycopg2://cpg:changeme@localhost:5432/cpg_analytics_test \
+  pytest tests/ -q
 
-# 3. Generate data
-python3 scripts/generate_data.py
-
-# 4. Run ingestion
-python3 -m src.ingestion.pipeline
-
-# 5. Run forecaster (writes to Postgres)
-python3 -m src.forecasting.forecaster
-
-# 6. Start API
-uvicorn src.api.main:app --reload --port 8000
-
-# 7. Start UI  (in a separate terminal)
-streamlit run ui/app.py
+# With coverage
+pytest tests/ --cov=src --cov-report=term-missing
 ```
 
-Open: `http://localhost:8501` (UI) · `http://localhost:8000/docs` (API docs)
-
-### Docker Compose (full stack)
-
-```bash
-docker compose up --build
-```
-
-Starts: `postgres` → `api` (depends on postgres healthy) → `ui` (depends on api).
-
-Services: Postgres on `:5432`, API on `:8000`, UI on `:8501`.
-
----
-
-## Environment Variables (`.env`)
-
-| Variable | Default | Purpose |
+| File | Tests | DB required |
 |---|---|---|
-| `POSTGRES_HOST` | `localhost` | Postgres host |
-| `POSTGRES_PORT` | `5432` | Postgres port |
-| `POSTGRES_DB` | `cpg_analytics` | Database name |
-| `POSTGRES_USER` | `cpg` | DB user |
-| `POSTGRES_PASSWORD` | `changeme` | DB password |
-| `DATABASE_URL` | _(derived)_ | Override full DSN (set by docker-compose automatically) |
-| `DEEPSEEK_API_KEY` | _(blank)_ | LLM key — leave blank to use deterministic fallback |
-| `DEEPSEEK_MODEL` | `deepseek-chat` | Model name |
-| `API_BASE_URL` | `http://localhost:8000` | UI → API base URL (set to `http://api:8000` in Docker) |
+| `test_excel_io.py` | 12 | No |
+| `test_pipeline.py` | 9 | No |
+| `test_api.py` | 28 | No (all deps mocked) |
+| `test_forecaster.py` | 9 | No |
+| `test_integration.py` | 6 | Yes (skipped without `TEST_DATABASE_URL`) |
+
+CI runs all 64 tests on every push with a Postgres service container.
+
+---
+
+## Docker Services
+
+```
+postgres → ollama → api → ui
+              ↑
+         ollama-init (one-shot model pull, exits after)
+```
+
+| Service | Image | Port | Notes |
+|---|---|---|---|
+| `postgres` | `postgres:16-alpine` | 5432 | `db/init/01_schema.sql` auto-applied on first start |
+| `ollama` | `ollama/ollama` | 11434 | LLM server; model cached in `ollama_data` volume |
+| `ollama-init` | `ollama/ollama` | — | Pulls `llama3.1` (~4.7 GB) once, then exits; `restart: "no"` |
+| `api` | `Dockerfile.api` | 8000 | Bind-mounts `./data` + `./config`; gets DB + Ollama URLs injected |
+| `ui` | `Dockerfile.ui` | 8501 | Gets `API_BASE_URL=http://api:8000` injected |
+
+**Ollama note:** Ollama is not installed on the host. It runs entirely inside Docker. The model weights persist in the `ollama_data` named volume so they survive container restarts. First download takes 5–15 minutes depending on connection speed.
+
+---
+
+## Environment Variables
+
+Copy `.env.example` to `.env` — defaults work out of the box for local dev and Docker.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `POSTGRES_HOST` | `localhost` | Set to `postgres` automatically in Docker |
+| `POSTGRES_PORT` | `5432` | |
+| `POSTGRES_DB` | `cpg_analytics` | |
+| `POSTGRES_USER` | `cpg` | |
+| `POSTGRES_PASSWORD` | `changeme` | |
+| `DATABASE_URL` | _(derived)_ | Override full DSN; docker-compose sets this automatically |
+| `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Set to `http://ollama:11434/v1` in Docker |
+| `OLLAMA_MODEL` | `llama3.1` | Any pulled model, e.g. `mistral:7b`, `phi3:mini` |
+| `API_BASE_URL` | `http://localhost:8000` | Set to `http://api:8000` in Docker |
 | `INGESTION_CONFIG` | `config/ingestion.json` | Path to ingestion config |
-| `LOG_LEVEL` | `INFO` | Loguru level |
-
----
-
-## Postgres Tables
-
-| Table | Written by | Read by |
-|---|---|---|
-| `dim_region`, `dim_store`, `dim_product`, `seasonal_calendar`, `promo_windows`, `marketing_campaigns`, `competitor_prices`, `sales_transactions` | (schema only; data lives in CSVs) | — |
-| `load_batch` | `/ingest` API endpoint | `/quality` endpoint, Dashboard |
-| `data_quality_log` | (reserved for future DQ tracking) | `/quality` endpoint |
-| `forecast_results` | `forecaster.py` | `/forecast` endpoint, Forecast page |
+| `LOG_LEVEL` | `INFO` | loguru level |
 
 ---
 
 ## Key Design Decisions
 
-**CSVs as the data layer** — the ingestion pipeline writes CSVs, not DB rows. CSVs act as lightweight tables for the forecaster and API. This avoids a DB dependency for ingestion and makes the data inspectable with any spreadsheet tool.
+**CSVs as the query layer** — the pipeline writes 9 CSVs to `data/output/downstream/`. The API and forecaster read from these, not directly from Postgres. Makes data inspectable with any tool; removes DB dependency from the API layer.
 
-**Config-driven ingestion** — every file name, sheet name, column map, and routing rule lives in `config/ingestion.json`. Adding a new data source requires editing JSON only, no Python changes.
+**Config-driven ingestion** — `config/ingestion.json` owns all file names, sheet names, and column maps. Adding a new source = edit JSON only, no Python changes.
 
-**Precomputed forecasts** — Prophet fits run as a CLI job (`forecaster.py`), not on API request. The API serves from a DB table. This keeps the API fast and stateless.
+**Precomputed forecasts** — `forecaster.py` is a CLI batch job, not called on API request. The API serves from the `forecast_results` table. Keeps the API fast and stateless.
 
-**Bounded LLM context** — `/ask` builds a compact pre-aggregated text context (revenue by category/region/month, quality stats, forecast metadata) and instructs the LLM to answer only from that context. Raw transaction rows are never sent to the LLM.
+**Bounded LLM context** — `/ask` sends a pre-aggregated text context (<1,000 tokens) to Ollama, not raw rows. The LLM cannot hallucinate data it hasn't seen.
 
-**LLM fallback** — both `/insights` and `/ask` return useful, deterministic responses when `DEEPSEEK_API_KEY` is blank. The stack runs end-to-end with no LLM key required.
+**LLM fallback** — both `/insights` and `/ask` return deterministic, useful answers when Ollama is not running. The whole stack works without any LLM.
+
+**Extending the platform:**
+
+| Task | Where to change |
+|---|---|
+| New Excel source | Add entry to `config/ingestion.json` |
+| New DQ rule | `src/dq/checker.py` |
+| New API endpoint | `src/api/routes/<name>.py` + register in `src/api/main.py` |
+| New Prophet regressor | `src/forecasting/forecaster.py` — follow `build_promo_feature()` |
+| New UI page | `ui/pages/<name>.py` + `st.Page(...)` in `ui/app.py` |
+| Swap LLM | Change `OLLAMA_BASE_URL` + `OLLAMA_MODEL` in `.env` |

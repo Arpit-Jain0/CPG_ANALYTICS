@@ -1,13 +1,22 @@
 """Application-wide settings, loaded once from environment variables."""
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Resolve .env relative to this file so it works regardless of where uvicorn is launched from:
+# src/common/config.py → src/common → src → project root → .env
+_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     # ── PostgreSQL ────────────────────────────────────────────────────────────
     postgres_host: str = Field(default="localhost", alias="POSTGRES_HOST")
@@ -32,10 +41,8 @@ class Settings(BaseSettings):
     # ── Ollama LLM ───────────────────────────────────────────────────────────
     # Ollama exposes an OpenAI-compatible API — no key required for local use.
     # In Docker Compose OLLAMA_BASE_URL is overridden to http://ollama:11434/v1.
-    ollama_base_url: str = Field(
-        default="http://localhost:11434/v1", alias="OLLAMA_BASE_URL"
-    )
-    ollama_model: str = Field(default="llama3.1", alias="OLLAMA_MODEL")
+    ollama_base_url: str = Field(default="http://localhost:11434/v1", alias="OLLAMA_BASE_URL")
+    ollama_model: str = Field(default="llama3.2:latest", alias="OLLAMA_MODEL")
 
     @property
     def llm_enabled(self) -> bool:
@@ -59,14 +66,10 @@ class Settings(BaseSettings):
     data_output_quality_reports: str = Field(
         default="data/output/quality_reports", alias="DATA_OUTPUT_QUALITY_REPORTS"
     )
-    data_output_archive: str = Field(
-        default="data/output/archive", alias="DATA_OUTPUT_ARCHIVE"
-    )
+    data_output_archive: str = Field(default="data/output/archive", alias="DATA_OUTPUT_ARCHIVE")
 
     # ── Ingestion config ──────────────────────────────────────────────────────
-    ingestion_config: str = Field(
-        default="config/ingestion.json", alias="INGESTION_CONFIG"
-    )
+    ingestion_config: str = Field(default="config/ingestion.json", alias="INGESTION_CONFIG")
 
 
 @lru_cache(maxsize=1)

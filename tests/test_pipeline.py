@@ -13,10 +13,8 @@ Scenarios
   yields the same row count (not doubled).
 - File-level pipeline: an Excel file in a temp dir produces the expected CSV.
 """
-from __future__ import annotations
 
-import json
-from pathlib import Path
+from __future__ import annotations
 
 import pandas as pd
 import pytest
@@ -31,11 +29,10 @@ from src.ingestion.pipeline import (
     apply_sheet_config,
     clean_dataframe,
     run_pipeline,
-    write_csv,
 )
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _default_settings():
     return PipelineSettings(
@@ -46,18 +43,19 @@ def _default_settings():
 
 # ── POS schema mapping ─────────────────────────────────────────────────────────
 
+
 def test_pos_schema_mapping():
     """POS source columns are renamed to canonical names via column_map."""
     df = pd.DataFrame(
         {
             "transaction_id": ["T001", "T002"],
-            "ts":             ["2024-01-10 08:00:00", "2024-01-11 09:00:00"],
-            "store_id":       ["S01", "S02"],
-            "sku":            ["SKU01", "SKU02"],
-            "qty":            [2, 3],
-            "unit_price":     [10.0, 20.0],
-            "amount":         [20.0, 60.0],
-            "currency":       ["USD", "USD"],
+            "ts": ["2024-01-10 08:00:00", "2024-01-11 09:00:00"],
+            "store_id": ["S01", "S02"],
+            "sku": ["SKU01", "SKU02"],
+            "qty": [2, 3],
+            "unit_price": [10.0, 20.0],
+            "amount": [20.0, 60.0],
+            "currency": ["USD", "USD"],
         }
     )
     sheet_cfg = SheetConfig(
@@ -65,20 +63,29 @@ def test_pos_schema_mapping():
         target_csv="sales_transactions.csv",
         column_map={
             "transaction_id": "transaction_id",
-            "ts":             "transaction_ts",
-            "store_id":       "store_id",
-            "sku":            "sku",
-            "qty":            "quantity",
-            "unit_price":     "unit_price",
-            "amount":         "revenue",
-            "currency":       "currency",
+            "ts": "transaction_ts",
+            "store_id": "store_id",
+            "sku": "sku",
+            "qty": "quantity",
+            "unit_price": "unit_price",
+            "amount": "revenue",
+            "currency": "currency",
         },
         add_columns={"source_system": "POS"},
     )
     result = apply_sheet_config(df.copy(), sheet_cfg, "pos_2024.xlsx")
 
-    expected_cols = {"transaction_id", "transaction_ts", "store_id", "sku",
-                     "quantity", "unit_price", "revenue", "currency", "source_system"}
+    expected_cols = {
+        "transaction_id",
+        "transaction_ts",
+        "store_id",
+        "sku",
+        "quantity",
+        "unit_price",
+        "revenue",
+        "currency",
+        "source_system",
+    }
     assert set(result.columns) == expected_cols
     assert list(result["source_system"]) == ["POS", "POS"]
     assert "qty" not in result.columns
@@ -87,6 +94,7 @@ def test_pos_schema_mapping():
 
 # ── ONLINE schema mapping ──────────────────────────────────────────────────────
 
+
 def test_online_schema_mapping():
     """
     ONLINE (Schema B) has no 'amount' column; the mapping omits revenue so the
@@ -94,26 +102,26 @@ def test_online_schema_mapping():
     """
     df = pd.DataFrame(
         {
-            "order_id":       ["O001", "O002"],
+            "order_id": ["O001", "O002"],
             "order_datetime": ["2024-01-10 10:00:00", "2024-01-11 11:00:00"],
-            "location_id":    ["S01", "S02"],
-            "product_sku":    ["SKU01", "SKU02"],
-            "units":          [1, 2],
+            "location_id": ["S01", "S02"],
+            "product_sku": ["SKU01", "SKU02"],
+            "units": [1, 2],
             "price_per_unit": [15.0, 25.0],
-            "currency":       ["USD", "USD"],
+            "currency": ["USD", "USD"],
         }
     )
     sheet_cfg = SheetConfig(
         sheet="*",
         target_csv="sales_transactions.csv",
         column_map={
-            "order_id":       "transaction_id",
+            "order_id": "transaction_id",
             "order_datetime": "transaction_ts",
-            "location_id":    "store_id",
-            "product_sku":    "sku",
-            "units":          "quantity",
+            "location_id": "store_id",
+            "product_sku": "sku",
+            "units": "quantity",
             "price_per_unit": "unit_price",
-            "currency":       "currency",
+            "currency": "currency",
         },
         add_columns={"source_system": "ONLINE"},
     )
@@ -126,11 +134,12 @@ def test_online_schema_mapping():
 
 # ── Currency normalisation ─────────────────────────────────────────────────────
 
+
 def test_currency_string_normalised():
     """Currency-formatted strings like '$1,234.56' must coerce to numeric."""
     df = pd.DataFrame(
         {
-            "amount":   ["$1,234.56", "€2,000.00", "3500"],
+            "amount": ["$1,234.56", "€2,000.00", "3500"],
             "store_id": ["S01", "S02", "S03"],  # ID column — must NOT coerce
         }
     )
@@ -152,13 +161,14 @@ def test_whitespace_stripped_from_strings():
 
 # ── Null repair ────────────────────────────────────────────────────────────────
 
+
 def test_null_markers_become_na():
     """Recognised null markers (N/A, NULL, etc.) must become pd.NA after cleaning."""
     df = pd.DataFrame(
         {
-            "txn_id":  ["T001", "T002", "T003"],
-            "amount":  ["100", "NULL", "N/A"],
-            "store":   ["S01", "NA", "S03"],
+            "txn_id": ["T001", "T002", "T003"],
+            "amount": ["100", "NULL", "N/A"],
+            "store": ["S01", "NA", "S03"],
         }
     )
     result = clean_dataframe(df.copy(), _default_settings())
@@ -173,8 +183,8 @@ def test_all_null_rows_dropped():
     df = pd.DataFrame(
         {
             "txn_id": ["T001", "NULL", "T003"],
-            "amount": [10, "NA",  30],
-            "store":  ["S1", "N/A", "S3"],
+            "amount": [10, "NA", 30],
+            "store": ["S1", "N/A", "S3"],
         }
     )
     result = clean_dataframe(df.copy(), _default_settings())
@@ -186,12 +196,13 @@ def test_all_null_rows_dropped():
 
 # ── Date parsing ──────────────────────────────────────────────────────────────
 
+
 def test_date_columns_parsed():
     """Columns containing 'date' in the name are coerced to datetime."""
     df = pd.DataFrame(
         {
             "transaction_date": ["2024-01-01", "2024-06-15"],
-            "amount":           [100, 200],
+            "amount": [100, 200],
         }
     )
     result = clean_dataframe(df.copy(), _default_settings())
@@ -199,6 +210,7 @@ def test_date_columns_parsed():
 
 
 # ── Idempotent overwrite ───────────────────────────────────────────────────────
+
 
 def test_idempotent_overwrite(tmp_path, wb_factory):
     """
@@ -209,15 +221,9 @@ def test_idempotent_overwrite(tmp_path, wb_factory):
     data_dir.mkdir()
     out_dir = tmp_path / "downstream"
 
-    excel_path = wb_factory.__wrapped__(
-        str(data_dir / "batch.xlsx")
-        if hasattr(wb_factory, "__wrapped__")
-        else None,
-        {"Sales": [["id", "value"], [1, 10], [2, 20], [3, 30]]},
-    ) if False else None  # built manually below
-
     # Create the Excel manually since wb_factory uses tmp_path (different dir)
     import openpyxl
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Sales"
@@ -248,12 +254,13 @@ def test_idempotent_overwrite(tmp_path, wb_factory):
     run_pipeline(tmp_path, config)
     count_second = sum(1 for _ in (out_dir / "out.csv").open()) - 1
 
-    assert count_first == count_second == 3, (
-        f"Expected 3 rows both times; got {count_first} then {count_second}"
-    )
+    assert (
+        count_first == count_second == 3
+    ), f"Expected 3 rows both times; got {count_first} then {count_second}"
 
 
 # ── File-level pipeline smoke test ───────────────────────────────────────────
+
 
 def test_pipeline_end_to_end(tmp_path):
     """
@@ -269,9 +276,9 @@ def test_pipeline_end_to_end(tmp_path):
     ws = wb.active
     ws.title = "Transactions"
     for row in [
-        ["txn_id", "store", "sku",    "qty", "price",  "curr"],
-        ["T001",   "S01",   "SKU01",  2,      15.0,    "USD"],
-        ["T002",   "S02",   "SKU02",  1,      30.0,    "USD"],
+        ["txn_id", "store", "sku", "qty", "price", "curr"],
+        ["T001", "S01", "SKU01", 2, 15.0, "USD"],
+        ["T002", "S02", "SKU02", 1, 30.0, "USD"],
     ]:
         ws.append(row)
     wb.save(str(src_dir / "sample.xlsx"))
@@ -282,11 +289,11 @@ def test_pipeline_end_to_end(tmp_path):
         write_mode="overwrite",
         column_map={
             "txn_id": "transaction_id",
-            "store":  "store_id",
-            "sku":    "sku",
-            "qty":    "quantity",
-            "price":  "unit_price",
-            "curr":   "currency",
+            "store": "store_id",
+            "sku": "sku",
+            "qty": "quantity",
+            "price": "unit_price",
+            "curr": "currency",
         },
         add_columns={"source_system": "POS"},
     )
@@ -307,7 +314,13 @@ def test_pipeline_end_to_end(tmp_path):
     assert out_csv.exists()
     df = pd.read_csv(out_csv)
     assert list(df.columns) == [
-        "transaction_id", "store_id", "sku", "quantity", "unit_price", "currency", "source_system",
+        "transaction_id",
+        "store_id",
+        "sku",
+        "quantity",
+        "unit_price",
+        "currency",
+        "source_system",
     ]
     assert len(df) == 2
     assert df["transaction_id"].iloc[0] == "T001"

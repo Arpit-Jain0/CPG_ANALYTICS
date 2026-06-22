@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "cpg-analytics"
@@ -30,14 +30,13 @@ dependencies = [
     # UI
     "streamlit>=1.35",
 
-    # HTTP (DeepSeek LLM calls)
+    # HTTP client (Ollama LLM calls)
     "httpx>=0.27",
 
     # Utilities
     "python-dotenv>=1.0",
     "tenacity>=8.3",
     "loguru>=0.7",
-    "rich>=13.7",
     "pyyaml>=6.0",
 ]
 
@@ -55,7 +54,8 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["src*"]
 
 # ---------------------------------------------------------------------------
 # Ruff
@@ -78,7 +78,11 @@ select = [
 ]
 ignore = [
     "E501",  # line length — handled by black
+    "B008",  # FastAPI Query/Depends as default arg — intentional pattern
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"ui/**" = ["E402"]  # sys.path.insert before imports is required in Streamlit pages
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]

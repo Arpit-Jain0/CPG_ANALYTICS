@@ -10,6 +10,7 @@ Fallback behaviour when Ollama is unreachable:
   /insights → deterministic templated summary built from the aggregated data
   /ask      → "LLM unavailable" message with the bounded context rendered as text
 """
+
 from __future__ import annotations
 
 import logging
@@ -25,6 +26,7 @@ _MAX_TOKENS = 768
 
 
 # ── Internal LLM caller ───────────────────────────────────────────────────────
+
 
 async def _call_llm(messages: list[dict]) -> str | None:
     """
@@ -55,7 +57,9 @@ async def _call_llm(messages: list[dict]) -> str | None:
             return resp.json()["choices"][0]["message"]["content"].strip()
 
     except httpx.ConnectError:
-        logger.warning("Ollama not reachable at %s — using deterministic fallback", settings.ollama_base_url)
+        logger.warning(
+            "Ollama not reachable at %s — using deterministic fallback", settings.ollama_base_url
+        )
     except httpx.ReadTimeout:
         logger.warning("Ollama timed out after %.0fs — using deterministic fallback", _TIMEOUT)
     except httpx.HTTPStatusError as exc:
@@ -71,6 +75,7 @@ async def _call_llm(messages: list[dict]) -> str | None:
 
 
 # ── Deterministic fallbacks ───────────────────────────────────────────────────
+
 
 def _insights_summary(agg: dict) -> str:
     total = agg["total_revenue"]
@@ -114,13 +119,21 @@ async def generate_insights(agg: dict) -> tuple[str, bool]:
     Tries Ollama first; falls back to _insights_summary on any failure.
     """
     total = agg["total_revenue"]
-    figures = "\n".join([
-        f"Total revenue: ${total:,.2f}",
-        "Revenue by category:",
-        *[f"  {r['category']}: ${r['revenue']:,.2f} ({r['revenue'] / total:.1%})" for r in agg["by_category"]],
-        "Revenue by region:",
-        *[f"  {r['region']}: ${r['revenue']:,.2f} ({r['revenue'] / total:.1%})" for r in agg["by_region"]],
-    ])
+    figures = "\n".join(
+        [
+            f"Total revenue: ${total:,.2f}",
+            "Revenue by category:",
+            *[
+                f"  {r['category']}: ${r['revenue']:,.2f} ({r['revenue'] / total:.1%})"
+                for r in agg["by_category"]
+            ],
+            "Revenue by region:",
+            *[
+                f"  {r['region']}: ${r['revenue']:,.2f} ({r['revenue'] / total:.1%})"
+                for r in agg["by_region"]
+            ],
+        ]
+    )
 
     messages = [
         {"role": "system", "content": _INSIGHTS_SYSTEM},

@@ -9,13 +9,14 @@ Structure
 - db_engine       — SQLAlchemy engine against TEST_DATABASE_URL (skips when absent)
 - db_session      — transactional session that rolls back after each DB test
 """
+
 from __future__ import annotations
 
 import os
 from contextlib import ExitStack
 from datetime import date
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import openpyxl
 import pandas as pd
@@ -36,6 +37,7 @@ requires_db = pytest.mark.skipif(
 
 # ── Excel / workbook helpers ──────────────────────────────────────────────────
 
+
 @pytest.fixture
 def wb_factory(tmp_path):
     """
@@ -45,6 +47,7 @@ def wb_factory(tmp_path):
     -----
     path = wb_factory("test.xlsx", {"Sheet1": [["col_a", "col_b"], [1, 2], [3, 4]]})
     """
+
     def _make(name: str, sheets: dict[str, list[list]]) -> Path:
         wb = openpyxl.Workbook()
         wb.remove(wb.active)
@@ -60,6 +63,7 @@ def wb_factory(tmp_path):
 
 
 # ── Minimal downstream CSVs ───────────────────────────────────────────────────
+
 
 @pytest.fixture
 def downstream_csvs(tmp_path):
@@ -158,6 +162,7 @@ _MOCK_AGG = {
 
 # ── API test client ────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def api_client():
     """
@@ -184,7 +189,10 @@ def api_client():
         patch("src.api.routes.summary.get_revenue_kpis", return_value=_MOCK_KPIS),
         patch("src.api.routes.quality.get_quality_summary", return_value=_MOCK_QUALITY),
         patch("src.api.routes.forecast.get_forecast_rows", return_value=_MOCK_FORECAST),
-        patch("src.api.routes.ingest.run_ingest", return_value={"files_processed": 1, "inserted": 5, "load_batch_id": 1}),
+        patch(
+            "src.api.routes.ingest.run_ingest",
+            return_value={"files_processed": 1, "inserted": 5, "load_batch_id": 1},
+        ),
         patch("src.api.routes.insights.get_insights_aggregates", return_value=_MOCK_AGG),
         patch("src.api.routes.ask.build_bounded_context", return_value="context text"),
         patch(
@@ -205,6 +213,7 @@ def api_client():
 
 
 # ── DB fixtures (integration tests only) ─────────────────────────────────────
+
 
 @pytest.fixture(scope="session")
 def db_engine():

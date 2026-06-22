@@ -14,7 +14,9 @@
       "%d-%b-%Y %H:%M:%S",
       "%d-%b-%Y"
     ],
-    "downstream_dir": "data/output/downstream"
+    "downstream_dir": "data/output/downstream",
+    "quality_reports_dir": "data/output/quality_reports",
+    "archive_dir": "data/archive"
   },
 
   "file_groups": [
@@ -30,25 +32,33 @@
           "sheet": "dim_region",
           "target_csv": "dim_region.csv",
           "write_mode": "overwrite",
-          "enabled": true
+          "enabled": true,
+          "pk_column": "region",
+          "raw_table": "raw.dim_region"
         },
         {
           "sheet": "dim_store",
           "target_csv": "dim_store.csv",
           "write_mode": "overwrite",
-          "enabled": true
+          "enabled": true,
+          "pk_column": "store_id",
+          "raw_table": "raw.dim_store"
         },
         {
           "sheet": "dim_product",
           "target_csv": "dim_product.csv",
           "write_mode": "overwrite",
-          "enabled": true
+          "enabled": true,
+          "pk_column": "sku",
+          "raw_table": "raw.dim_product"
         },
         {
           "sheet": "seasonal_calendar",
           "target_csv": "seasonal_calendar.csv",
           "write_mode": "overwrite",
-          "enabled": true
+          "enabled": true,
+          "pk_column": "calendar_date",
+          "raw_table": "raw.seasonal_calendar"
         }
       ]
     },
@@ -64,7 +74,9 @@
           "sheet": "*",
           "target_csv": "promo_windows.csv",
           "write_mode": "overwrite",
-          "enabled": true
+          "enabled": true,
+          "pk_column": "promo_id",
+          "raw_table": "raw.promo_windows"
         }
       ]
     },
@@ -80,7 +92,9 @@
           "sheet": "*",
           "target_csv": "marketing_campaigns.csv",
           "write_mode": "overwrite",
-          "enabled": true
+          "enabled": true,
+          "pk_column": "campaign_id",
+          "raw_table": "raw.marketing_campaigns"
         }
       ]
     },
@@ -96,7 +110,8 @@
           "sheet": "*",
           "target_csv": "competitor_prices.csv",
           "write_mode": "overwrite",
-          "enabled": true
+          "enabled": true,
+          "raw_table": "raw.competitor_prices"
         }
       ]
     },
@@ -113,6 +128,14 @@
           "target_csv": "sales_transactions.csv",
           "write_mode": "overwrite",
           "enabled": true,
+          "pk_column": "transaction_id",
+          "raw_table": "raw.pos_transactions",
+          "curated_table": "curated.sales_transactions",
+          "datatype_rules": {
+            "qty":        "positive_numeric",
+            "unit_price": "numeric",
+            "amount":     "numeric"
+          },
           "column_map": {
             "transaction_id": "transaction_id",
             "ts":             "transaction_ts",
@@ -143,6 +166,13 @@
           "target_csv": "sales_transactions.csv",
           "write_mode": "append",
           "enabled": true,
+          "pk_column": "order_id",
+          "raw_table": "raw.online_orders",
+          "curated_table": "curated.sales_transactions",
+          "datatype_rules": {
+            "units":          "positive_numeric",
+            "price_per_unit": "numeric"
+          },
           "column_map": {
             "order_id":       "transaction_id",
             "order_datetime": "transaction_ts",
@@ -172,6 +202,14 @@
           "target_csv": "sales_transactions.csv",
           "write_mode": "append",
           "enabled": true,
+          "pk_column": "transaction_id",
+          "raw_table": "raw.pos_transactions",
+          "curated_table": "curated.sales_transactions",
+          "datatype_rules": {
+            "qty":        "positive_numeric",
+            "unit_price": "numeric",
+            "amount":     "numeric"
+          },
           "column_map": {
             "transaction_id": "transaction_id",
             "ts":             "transaction_ts",
@@ -192,6 +230,13 @@
           "target_csv": "sales_transactions.csv",
           "write_mode": "append",
           "enabled": true,
+          "pk_column": "order_id",
+          "raw_table": "raw.online_orders",
+          "curated_table": "curated.sales_transactions",
+          "datatype_rules": {
+            "units":          "positive_numeric",
+            "price_per_unit": "numeric"
+          },
           "column_map": {
             "order_id":       "transaction_id",
             "order_datetime": "transaction_ts",
@@ -210,7 +255,10 @@
           "sheet": "product_updates",
           "target_csv": "product_updates.csv",
           "write_mode": "append",
-          "enabled": true
+          "enabled": true,
+          "pk_column": "sku",
+          "raw_table": "raw.product_updates",
+          "curated_table": "curated.product_updates"
         }
       ]
     }

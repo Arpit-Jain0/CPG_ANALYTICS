@@ -11,6 +11,7 @@ Scenarios
 - Requesting a non-existent target sheet raises KeyError.
 - infer_source_system maps filenames/sheet names to source labels.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -19,8 +20,8 @@ import pytest
 
 from src.common.excel_io import infer_source_system, read_workbook
 
-
 # ── Title-row detection ────────────────────────────────────────────────────────
+
 
 def test_title_row_skipped(wb_factory):
     """
@@ -62,6 +63,7 @@ def test_title_row_data_intact(wb_factory):
 
 # ── Ghost-sheet detection ──────────────────────────────────────────────────────
 
+
 def test_ghost_sheet_ignored(wb_factory):
     """A sheet with no cell content is silently skipped."""
     sheets = {
@@ -94,6 +96,7 @@ def test_all_ghost_returns_empty(tmp_path):
 
 # ── Target-sheet selection ─────────────────────────────────────────────────────
 
+
 def test_target_sheet_by_name(wb_factory):
     """Only the explicitly requested sheet is returned."""
     sheets = {
@@ -119,15 +122,16 @@ def test_unknown_target_sheet_raises(wb_factory):
 
 # ── Source-system inference ────────────────────────────────────────────────────
 
+
 @pytest.mark.parametrize(
     "filename,sheet,expected",
     [
         ("pos_history_2024.xlsx", "Sales", "POS"),
-        ("online_orders.xlsx",   "Orders", "ONLINE"),
-        ("promo_data.xlsx",      "promos",  "PROMO"),
-        ("campaign_q1.xlsx",     "campaign_spend", "MARKETING"),
-        ("competitor.xlsx",      "prices",  "COMPETITOR"),
-        ("unknown_file.xlsx",    "Sheet1",  "UNKNOWN"),
+        ("online_orders.xlsx", "Orders", "ONLINE"),
+        ("promo_data.xlsx", "promos", "PROMO"),
+        ("campaign_q1.xlsx", "campaign_spend", "MARKETING"),
+        ("competitor.xlsx", "prices", "COMPETITOR"),
+        ("unknown_file.xlsx", "Sheet1", "UNKNOWN"),
     ],
 )
 def test_infer_source_system(filename, sheet, expected):

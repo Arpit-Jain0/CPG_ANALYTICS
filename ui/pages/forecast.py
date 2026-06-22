@@ -1,4 +1,5 @@
 """Page 2 — Forecast: Prophet predictions with confidence band."""
+
 import sys
 from pathlib import Path
 
@@ -22,16 +23,18 @@ st.divider()
 
 # ── Controls ──────────────────────────────────────────────────────────────────
 
+
 # Fetch summary once to populate dropdowns (no extra endpoint needed)
 @st.cache_data(ttl=300, show_spinner=False)
 def _choices():
     try:
         s = api_client.get_summary()
         cats = [r["category"] for r in s["revenue_by_category"]]
-        regs = [r["region"]   for r in s["revenue_by_region"]]
+        regs = [r["region"] for r in s["revenue_by_region"]]
         return cats, regs
     except Exception:
         return [], []
+
 
 cats, regs = _choices()
 
@@ -56,7 +59,7 @@ st.divider()
 
 if run_btn or "forecast_data" not in st.session_state:
     cat_arg = None if selected_cat == "All categories" else selected_cat
-    reg_arg = None if selected_reg == "All regions"    else selected_reg
+    reg_arg = None if selected_reg == "All regions" else selected_reg
 
     try:
         with st.spinner("Fetching forecast…"):
@@ -69,6 +72,14 @@ if run_btn or "forecast_data" not in st.session_state:
         st.session_state["forecast_label"] = (
             f"{selected_cat} · {selected_reg} · {horizon}-day horizon"
         )
+    except requests.exceptions.ConnectionError:
+        st.error(
+            "❌ Cannot reach the API. Is the server running?  `uvicorn src.api.main:app --port 8000`"
+        )
+        st.stop()
+    except requests.exceptions.Timeout:
+        st.error("❌ Request timed out fetching the forecast.")
+        st.stop()
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 404:
             st.warning(
@@ -76,13 +87,13 @@ if run_btn or "forecast_data" not in st.session_state:
                 "Run the forecaster first: `python -m src.forecasting.forecaster`"
             )
         else:
-            st.error(f"API error {e.response.status_code}: {e.response.text[:300]}")
+            st.error(f"❌ API error {e.response.status_code}: {e.response.text[:300]}")
         st.stop()
-    except requests.exceptions.ConnectionError:
-        st.error("Cannot reach the API.")
+    except Exception as e:
+        st.error(f"❌ Unexpected error: {type(e).__name__}: {e}")
         st.stop()
 
-data  = st.session_state.get("forecast_data")
+data = st.session_state.get("forecast_data")
 label = st.session_state.get("forecast_label", "")
 
 if not data or not data.get("points"):
@@ -94,10 +105,10 @@ if not data or not data.get("points"):
 p1, p2, p3, p4 = st.columns(4)
 points = data["points"]
 revenues = [p["predicted_revenue"] for p in points]
-p1.metric("Run Date",      str(data.get("run_date", "—")))
-p2.metric("Model",         data.get("model_version", "—"))
+p1.metric("Run Date", str(data.get("run_date", "—")))
+p2.metric("Model", data.get("model_version", "—"))
 p3.metric("Peak Forecast", f"${max(revenues):,.2f}")
-p4.metric("Avg Forecast",  f"${sum(revenues)/len(revenues):,.2f}")
+p4.metric("Avg Forecast", f"${sum(revenues)/len(revenues):,.2f}")
 
 st.markdown(f"*{label}*  ·  {len(points)} data points")
 
@@ -111,7 +122,7 @@ band = (
     .mark_area(opacity=0.20, color="#2563EB")
     .encode(
         x=alt.X("target_date:T", title="Date"),
-        y=alt.Y("yhat_lower:Q",  title="Revenue ($)", axis=alt.Axis(format="$,.0f")),
+        y=alt.Y("yhat_lower:Q", title="Revenue ($)", axis=alt.Axis(format="$,.0f")),
         y2="yhat_upper:Q",
     )
 )
@@ -123,10 +134,10 @@ line = (
         x=alt.X("target_date:T"),
         y=alt.Y("predicted_revenue:Q"),
         tooltip=[
-            alt.Tooltip("target_date:T",        title="Date"),
-            alt.Tooltip("predicted_revenue:Q",  title="Predicted",   format="$,.2f"),
-            alt.Tooltip("yhat_lower:Q",         title="Lower bound", format="$,.2f"),
-            alt.Tooltip("yhat_upper:Q",         title="Upper bound", format="$,.2f"),
+            alt.Tooltip("target_date:T", title="Date"),
+            alt.Tooltip("predicted_revenue:Q", title="Predicted", format="$,.2f"),
+            alt.Tooltip("yhat_lower:Q", title="Lower bound", format="$,.2f"),
+            alt.Tooltip("yhat_upper:Q", title="Upper bound", format="$,.2f"),
         ],
     )
 )
@@ -138,7 +149,7 @@ points_layer = (
         x="target_date:T",
         y="predicted_revenue:Q",
         tooltip=[
-            alt.Tooltip("target_date:T",       title="Date"),
+            alt.Tooltip("target_date:T", title="Date"),
             alt.Tooltip("predicted_revenue:Q", title="Predicted", format="$,.2f"),
         ],
     )
@@ -150,18 +161,22 @@ st.altair_chart(chart, use_container_width=True)
 # ── Raw table (collapsed) ─────────────────────────────────────────────────────
 
 with st.expander("📋 Raw forecast table"):
-    df_display = df.rename(columns={
-        "target_date":       "Date",
-        "predicted_revenue": "Predicted ($)",
-        "yhat_lower":        "Lower bound ($)",
-        "yhat_upper":        "Upper bound ($)",
-    })
+    df_display = df.rename(
+        columns={
+            "target_date": "Date",
+            "predicted_revenue": "Predicted ($)",
+            "yhat_lower": "Lower bound ($)",
+            "yhat_upper": "Upper bound ($)",
+        }
+    )
     st.dataframe(
-        df_display.style.format({
-            "Predicted ($)":   "${:,.2f}",
-            "Lower bound ($)": "${:,.2f}",
-            "Upper bound ($)": "${:,.2f}",
-        }),
+        df_display.style.format(
+            {
+                "Predicted ($)": "${:,.2f}",
+                "Lower bound ($)": "${:,.2f}",
+                "Upper bound ($)": "${:,.2f}",
+            }
+        ),
         use_container_width=True,
         hide_index=True,
     )

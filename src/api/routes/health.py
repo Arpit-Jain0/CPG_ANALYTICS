@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+
 from src.api.models import HealthResponse
 from src.common.db import ping
 

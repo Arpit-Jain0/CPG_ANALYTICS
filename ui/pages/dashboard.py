@@ -1,4 +1,5 @@
 """Page 1 — Dashboard: revenue KPIs + data-reliability panel."""
+
 import sys
 from pathlib import Path
 
@@ -14,18 +15,21 @@ import api_client
 # ── Header ────────────────────────────────────────────────────────────────────
 
 st.title("📊 Dashboard")
-st.caption("Revenue overview and data-quality snapshot. Data is sourced from the ingestion pipeline via the API.")
+st.caption(
+    "Revenue overview and data-quality snapshot. Data is sourced from the ingestion pipeline via the API."
+)
 
 # ── Date-range filter ─────────────────────────────────────────────────────────
 
 with st.expander("🗓  Filter by date range", expanded=False):
     c1, c2 = st.columns(2)
     start_date = c1.date_input("From", value=None, key="dash_start")
-    end_date   = c2.date_input("To",   value=None, key="dash_end")
+    end_date = c2.date_input("To", value=None, key="dash_end")
 
 st.divider()
 
 # ── Fetch data ────────────────────────────────────────────────────────────────
+
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_summary(start, end):
@@ -34,29 +38,48 @@ def fetch_summary(start, end):
         end_date=str(end) if end else None,
     )
 
+
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_quality():
     return api_client.get_quality()
 
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_products(start, end):
+    return api_client.get_products(
+        start_date=str(start) if start else None,
+        end_date=str(end) if end else None,
+        limit=20,
+    )
+
+
 try:
-    with st.spinner("Loading summary…"):
+    with st.spinner("Loading…"):
         summary = fetch_summary(start_date, end_date)
-    with st.spinner("Loading quality stats…"):
         quality = fetch_quality()
+        products = fetch_products(start_date, end_date)
 except requests.exceptions.ConnectionError:
-    st.error("Cannot reach the API. Is the server running?  `uvicorn src.api.main:app --port 8000`")
+    st.error(
+        "❌ Cannot reach the API. Is the server running?  `uvicorn src.api.main:app --port 8000`"
+    )
+    st.stop()
+except requests.exceptions.Timeout:
+    st.error("❌ Request timed out loading dashboard data. Try refreshing.")
     st.stop()
 except requests.exceptions.HTTPError as e:
-    st.error(f"API error: {e.response.status_code} — {e.response.text[:200]}")
+    st.error(f"❌ API error: {e.response.status_code} — {e.response.text[:200]}")
+    st.stop()
+except Exception as e:
+    st.error(f"❌ Unexpected error: {type(e).__name__}: {e}")
     st.stop()
 
 # ── KPI metrics row ───────────────────────────────────────────────────────────
 
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("💰 Total Revenue",    f"${summary['total_revenue']:,.2f}")
-m2.metric("🏆 Top Category",     summary["top_category"])
-m3.metric("📍 Top Region",       summary["top_region"])
-m4.metric("🧾 Transactions",     f"{summary['transaction_count']:,}")
+m1.metric("💰 Total Revenue", f"${summary['total_revenue']:,.2f}")
+m2.metric("🏆 Top Category", summary["top_category"])
+m3.metric("📍 Top Region", summary["top_region"])
+m4.metric("🧾 Transactions", f"{summary['transaction_count']:,}")
 
 st.divider()
 
@@ -123,8 +146,8 @@ st.divider()
 st.subheader("🔍 Data Reliability")
 
 q1, q2, q3 = st.columns(3)
-q1.metric("Total Issues Logged",   quality["total_issues"])
-q2.metric("Total Load Batches",    quality["total_batches"])
+q1.metric("Total Issues Logged", quality["total_issues"])
+q2.metric("Total Load Batches", quality["total_batches"])
 lb = quality.get("latest_batch")
 q3.metric(
     "Latest Batch (inserted)",
@@ -183,3 +206,48 @@ if lb:
         [{"metric": k.replace("_", " ").title(), "value": lb.get(k, 0)} for k in fields]
     )
     st.dataframe(batch_df, use_container_width=True, hide_index=True)
+
+st.divider()
+
+# ── Product Performance ───────────────────────────────────────────────────────
+
+st.subheader("🏷 Product Performance — Top SKUs by Revenue")
+
+prod_data = products.get("products", []) if products else []
+
+if prod_data:
+    df_prod = pd.DataFrame(prod_data)
+
+    # Bar chart: top products coloured by category
+    chart_prod = (
+        alt.Chart(df_prod)
+        .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
+        .encode(
+            x=alt.X("revenue:Q", title="Revenue ($)", axis=alt.Axis(format="$,.0f")),
+            y=alt.Y("sku:N", sort="-x", title="SKU"),
+            color=alt.Color(
+                "category:N",
+                legend=alt.Legend(title="Category"),
+                scale=alt.Scale(scheme="tableau10"),
+            ),
+            tooltip=[
+                alt.Tooltip("sku:N", title="SKU"),
+                alt.Tooltip("brand:N", title="Brand"),
+                alt.Tooltip("category:N", title="Category"),
+                alt.Tooltip("revenue:Q", title="Revenue", format="$,.2f"),
+                alt.Tooltip("transactions:Q", title="Transactions", format=","),
+            ],
+        )
+        .properties(height=max(200, len(df_prod) * 22))
+    )
+    st.altair_chart(chart_prod, use_container_width=True)
+
+    # Table view
+    with st.expander("📋 Full product table"):
+        df_display = df_prod.copy()
+        df_display["revenue"] = df_display["revenue"].map("${:,.2f}".format)
+        df_display["transactions"] = df_display["transactions"].map("{:,}".format)
+        df_display.columns = [c.replace("_", " ").title() for c in df_display.columns]
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
+else:
+    st.info("No product data — run ingestion first.")

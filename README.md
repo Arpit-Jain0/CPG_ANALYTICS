@@ -1,55 +1,161 @@
 # CPG Analytics Platform
 
-End-to-end sales analytics platform for a mid-size CPG company: data ingestion from Excel workbooks, data quality validation, revenue forecasting (Prophet + seasonal decomposition), AI-powered insights (DeepSeek), a FastAPI backend, and a Streamlit dashboard.
+End-to-end analytics platform for CPG sales data: raw Excel workbooks → 7-stage ingestion pipeline → Prophet revenue forecasts → FastAPI backend → Streamlit dashboard with AI Q&A.
 
-## Quick start
+---
+
+## What this is
+
+A production-skeleton that a team can clone, run, and extend. It covers:
+
+- **Ingestion** — config-driven Excel → Postgres + CSV pipeline with pre-ingestion DQ validation
+- **Forecasting** — Facebook Prophet, one model per (category × region) pair, 90-day horizon with 90% CI bands
+- **API** — FastAPI with 11 endpoints; OpenAPI docs auto-generated at `/docs`
+- **UI** — Streamlit dashboard (7 pages): Dashboard, Forecast, AI Insights, DQ Reports, Data Loads, DB Explorer
+- **LLM Q&A** — Ollama (local, offline); deterministic fallback if Ollama is not running
+- **Tests** — 58 unit + integration tests; DB-dependent tests gated on `TEST_DATABASE_URL`
+- **CI** — GitHub Actions: lint (Ruff + Black), tests with coverage, Docker image build check
+
+---
+
+## Quick start — Docker Compose (recommended)
 
 ```bash
-cp .env.example .env          # fill in secrets
-docker-compose up --build     # starts postgres + api + ui
+git clone <repo-url>
+cd <repo-folder>
+cp .env.example .env          # defaults work out of the box; no keys required
+
+docker compose up --build     # starts postgres + ollama + api + ui
 ```
 
-API docs: http://localhost:8000/docs  
-UI: http://localhost:8501
+First-time only — generate synthetic data and run the pipeline:
+
+```bash
+# Generate Excel input files (run on the host, from the repo root)
+python3 scripts/generate_data.py
+
+# Ingest historical data + incremental batches
+docker compose exec api python3 -m src.ingestion.pipeline --mode historical
+docker compose exec api python3 -m src.ingestion.pipeline --mode incremental
+
+# Train Prophet models (writes to forecast_results table)
+docker compose exec api python3 -m src.forecasting.forecaster
+```
+
+| Service | URL |
+|---|---|
+| Streamlit UI | http://localhost:8501 |
+| FastAPI + Swagger docs | http://localhost:8000/docs |
+| Postgres | localhost:5432 |
+| Ollama | http://localhost:11434 |
+
+> **First run:** Ollama downloads `llama3.1` (~4.7 GB) and caches it in a Docker volume. Subsequent starts take ~10 seconds. The API uses a deterministic fallback while the model is downloading.
+
+---
+
+## Quick start — local dev (no Docker for app services)
+
+```bash
+# Prerequisites: Python 3.11+, Docker Desktop (for Postgres only)
+cp .env.example .env
+pip install -e ".[dev]"
+
+docker compose up postgres -d            # only Postgres in Docker
+
+python3 scripts/generate_data.py         # create Excel input files
+python3 -m src.ingestion.pipeline        # run full pipeline
+python3 -m src.forecasting.forecaster    # train Prophet models
+
+uvicorn src.api.main:app --reload --port 8000   # Terminal 2
+streamlit run ui/app.py                          # Terminal 3
+```
+
+---
+
+## Tests
+
+```bash
+# Unit + API contract tests (no DB required — all external deps mocked)
+pytest tests/ -q
+
+# Include integration tests (requires Postgres)
+TEST_DATABASE_URL=postgresql+psycopg2://cpg:changeme@localhost:5432/cpg_analytics_test \
+  pytest tests/ -q
+
+# With line-level coverage
+pytest tests/ --cov=src --cov-report=term-missing
+```
+
+58 tests, 6 skipped (integration tests — skip when `TEST_DATABASE_URL` is not set).
+
+---
+
+## Linting
+
+```bash
+ruff check src tests      # style + import order + bugbear checks
+black --check src tests   # format check (CI fails on diff)
+black src tests           # auto-format
+```
+
+---
 
 ## Project layout
 
 ```
-cpg-analytics/
-  data/
-    input/historical/       # bulk-load .xlsx workbooks
-    input/incremental/      # ongoing batch drops
-  data/output/
-    processed/              # cleaned exports
-    quality_reports/        # DQ logs per batch
-    archive/                # inputs moved here after processing
-  db/init/                  # SQL schema run on postgres init
-  scripts/                  # synthetic data generator + utilities
-  src/
-    common/                 # config, db session, excel I/O, pydantic models
-    ingestion/              # source mappings, loaders (historical + incremental)
-    dq/                     # data-quality validators
-    forecasting/            # Prophet wrappers + seasonal logic
-    api/                    # FastAPI routers + schemas
-  ui/                       # Streamlit app
-  tests/
-  docs/adr/                 # Architecture Decision Records
-  .github/workflows/        # CI/CD
+CPG_analytics/                ← repo root (clone lands here)
+├── config/
+│   └── ingestion.json        ← all file/sheet routing rules (zero Python hardcoding)
+├── data/
+│   ├── input/
+│   │   ├── historical/       ← bulk Excel files (generated by scripts/generate_data.py)
+│   │   └── incremental/      ← weekly batch drops
+│   └── output/
+│       ├── downstream/       ← 9 clean CSVs read by API + forecaster
+│       └── quality_reports/  ← per-sheet DQ violation CSVs
+├── db/
+│   └── init/01_schema.sql    ← Postgres DDL (auto-applied on first Docker start)
+├── scripts/
+│   └── generate_data.py      ← synthetic data generator (seed=42, deterministic)
+├── src/
+│   ├── common/               ← settings, DB session, Excel reader
+│   ├── dq/                   ← DQ checker (3 checks per sheet)
+│   ├── ingestion/            ← config loader, 7-stage pipeline, DB writer
+│   ├── forecasting/          ← Prophet forecaster (one model per category×region)
+│   └── api/                  ← FastAPI app, Pydantic models, queries, routes, LLM client
+├── ui/
+│   ├── app.py                ← Streamlit entry point + st.navigation
+│   ├── api_client.py         ← thin requests wrapper (one function per endpoint)
+│   └── pages/                ← 8 pages (home, dashboard, forecast, insights, dq_reports,
+│                                          data_loads, database, architecture, test_coverage)
+├── tests/                    ← 64 tests (58 pass, 6 skip without TEST_DATABASE_URL)
+├── .github/workflows/ci.yml  ← lint + test + Docker build check on every push
+├── Dockerfile.api
+├── Dockerfile.ui
+├── docker-compose.yml        ← 5 services: postgres, ollama, ollama-init, api, ui
+├── pyproject.toml            ← deps + ruff/black/pytest config
+├── .env.example
+└── info.md                   ← complete platform reference
 ```
 
-## Development
+---
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-pytest
-ruff check src tests
-black --check src tests
-```
+## Extending the platform
 
-## Data conventions
+| Task | Where to change |
+|---|---|
+| Add a new Excel source | Add an entry to `config/ingestion.json` — no Python changes |
+| Add a new DQ rule | `src/ingestion/dq/checker.py` |
+| Add a new API endpoint | `src/api/routes/<name>.py` + wire in `src/api/main.py` |
+| Add a Prophet regressor | `src/forecasting/forecaster.py` — follow `build_promo_feature()` pattern |
+| Add a new UI page | `ui/pages/<name>.py` + `st.Page(...)` entry in `ui/app.py` |
+| Swap the LLM | Change `OLLAMA_BASE_URL` + `OLLAMA_MODEL` in `.env` |
 
-- All inputs are `.xlsx` workbooks (possibly multi-sheet, with leading metadata rows).
-- Workbooks are placed in `data/input/historical/` (initial load) or `data/input/incremental/` (ongoing).
-- After successful processing, inputs are moved to `data/output/archive/`.
-- Cleaned data and DQ reports are written to `data/output/processed/` and `data/output/quality_reports/` respectively.
+---
+
+## Further reading
+
+- [info.md](info.md) — full platform reference: architecture, all commands, data flow diagrams
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — onboarding guide for new engineers
+- [docs/adr/](docs/adr/) — Architecture Decision Records
+- [docs/llm_options.md](docs/llm_options.md) — LLM provider options and trade-offs
