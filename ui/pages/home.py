@@ -155,10 +155,7 @@ with row2[2]:
     </div>""",
         unsafe_allow_html=True,
     )
-    import os
-
-    api_base = os.environ.get("API_BASE_URL", "http://localhost:8000")
-    st.link_button("Open API Docs →", url=f"{api_base}/docs", use_container_width=True)
+    st.link_button("Open API Docs →", url="http://localhost:8000/docs", use_container_width=True)
 
 st.divider()
 

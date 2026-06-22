@@ -370,6 +370,8 @@ digraph API {
         dq    [label="DQ Reports", fillcolor="#a5f3fc", color="#0e7490"]
         loads [label="Data Loads", fillcolor="#a5f3fc", color="#0e7490"]
         dbx   [label="DB Explorer", fillcolor="#a5f3fc", color="#0e7490"]
+        arch  [label="Architecture", fillcolor="#e0e7ff", color="#4338ca"]
+        cov   [label="Test Coverage", fillcolor="#e0e7ff", color="#4338ca"]
         client [label="api_client.py", shape=component, fillcolor="#cffafe", color="#0e7490"]
 
         home  -> client
@@ -393,7 +395,7 @@ digraph API {
         quality  [label="GET /quality", fillcolor="#fed7aa", color="#c2410c"]
         products [label="GET /products", fillcolor="#fed7aa", color="#c2410c"]
         forecast [label="GET /forecast", fillcolor="#fed7aa", color="#c2410c"]
-        dqr      [label="GET /dq-reports", fillcolor="#fed7aa", color="#c2410c"]
+        dqr      [label="GET /dq-reports\nGET /dq-reports/{file}", fillcolor="#fed7aa", color="#c2410c"]
         db_ep    [label="GET /db/overview\nGET /db/table", fillcolor="#fed7aa", color="#c2410c"]
         ingest   [label="POST /ingest", fillcolor="#fed7aa", color="#c2410c"]
         genbatch [label="POST /generate-batch", fillcolor="#fed7aa", color="#c2410c"]
@@ -459,13 +461,20 @@ digraph API {
         st.markdown("""
 | Group | Endpoints |
 |---|---|
-| Health | `/health` |
-| Analytics | `/summary` · `/quality` · `/products` |
-| Forecast | `/forecast` |
-| Operations | `/ingest` · `/generate-batch` |
-| AI | `/insights` · `/ask` |
-| DB Explorer | `/db/overview` · `/db/table` |
-| DQ Reports | `/dq-reports` · `/dq-reports/{file}` |
+| Health | `GET /health` |
+| Analytics | `GET /summary` · `GET /quality` · `GET /products` |
+| Forecast | `GET /forecast` |
+| Operations | `POST /ingest` · `POST /generate-batch` |
+| AI | `POST /insights` · `POST /ask` |
+| DB Explorer | `GET /db/overview` · `GET /db/table` |
+| DQ Reports | `GET /dq-reports` · `GET /dq-reports/{file}` |
+""")
+        st.markdown("##### Pages by type")
+        st.markdown("""
+| Type | Pages |
+|---|---|
+| Live data (via API) | Home · Dashboard · Forecast · AI Insights · DQ Reports · Data Loads · DB Explorer |
+| Static | Architecture · Test Coverage |
 """)
 
 
